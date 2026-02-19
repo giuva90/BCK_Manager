@@ -1,0 +1,53 @@
+# ============================================================================
+# BCK Manager - .gitignore
+# ============================================================================
+
+# --- Credentials & secrets ---
+# Never commit the actual config with real credentials
+config.yaml
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+wheels/
+.eggs/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# --- Logs ---
+*.log
+bck_manager.log
+
+# --- Temp / OS artifacts ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+
+# --- Archives created during testing ---
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+
+# --- pytest / coverage ---
+.pytest_cache/
+.coverage
+htmlcov/

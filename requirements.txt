@@ -1,0 +1,5 @@
+# BCK Manager - Python Dependencies
+# Install with: pip3 install -r requirements.txt
+
+boto3>=1.28.0
+PyYAML>=6.0

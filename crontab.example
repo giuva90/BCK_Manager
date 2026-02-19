@@ -1,0 +1,16 @@
+# ============================================================================
+# BCK Manager - Crontab Example
+# ============================================================================
+# Add these lines to root's crontab to schedule automatic backups.
+#
+# To edit the crontab:
+#   sudo crontab -e
+#
+# ============================================================================
+
+# Run all backup jobs every day at 02:00
+0 2 * * * /usr/local/bin/bck-manager --run-all >> /var/log/bck_manager_cron.log 2>&1
+
+# Or, run individual jobs at specific times:
+# 0 3 * * * /usr/local/bin/bck-manager --run-job db-dumps >> /var/log/bck_manager_cron.log 2>&1
+# 0 4 * * 0 /usr/local/bin/bck-manager --run-job docker-compose-configs >> /var/log/bck_manager_cron.log 2>&1

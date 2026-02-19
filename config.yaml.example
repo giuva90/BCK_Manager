@@ -1,0 +1,75 @@
+# ============================================================================
+# BCK Manager - Configuration Example
+# ============================================================================
+# Copy this file to config.yaml and fill in your real values.
+# config.yaml is excluded from git to protect your credentials.
+# ============================================================================
+
+# --- S3-Compatible Endpoints ---
+s3_endpoints:
+  - name: "ovh-gra"
+    endpoint_url: "https://s3.gra.cloud.ovh.net"
+    access_key: "YOUR_ACCESS_KEY_HERE"
+    secret_key: "YOUR_SECRET_KEY_HERE"
+    region: "gra"
+
+  # Example: second endpoint or region
+  # - name: "ovh-sbg"
+  #   endpoint_url: "https://s3.sbg.cloud.ovh.net"
+  #   access_key: "ANOTHER_ACCESS_KEY"
+  #   secret_key: "ANOTHER_SECRET_KEY"
+  #   region: "sbg"
+
+# --- Backup Jobs ---
+# Fields:
+#   name           : Unique descriptive name for this job
+#   source_path    : Absolute path on the server to back up
+#   bucket         : Target S3 bucket name
+#   s3_endpoint    : Name of the S3 endpoint (must match one above)
+#   prefix         : S3 key prefix (subfolder inside the bucket)
+#   mode           : "folder" = compress entire folder as one archive
+#                    "files"  = compress each file individually
+#   retention_days : How many days to keep backups on S3 (0 = keep forever)
+#   enabled        : true/false to quickly enable/disable a job
+
+backup_jobs:
+  - name: "app-data"
+    source_path: "/opt/myapp/data"
+    bucket: "my-backups"
+    s3_endpoint: "ovh-gra"
+    prefix: "app-data"
+    mode: "folder"
+    retention_days: 30
+    enabled: true
+
+  - name: "db-dumps"
+    source_path: "/opt/backups/db"
+    bucket: "my-backups"
+    s3_endpoint: "ovh-gra"
+    prefix: "db-dumps"
+    mode: "files"
+    retention_days: 90
+    enabled: true
+
+  - name: "docker-compose-configs"
+    source_path: "/opt/docker"
+    bucket: "my-backups"
+    s3_endpoint: "ovh-gra"
+    prefix: "docker-configs"
+    mode: "folder"
+    retention_days: 60
+    enabled: true
+
+# --- General Settings ---
+settings:
+  # Temporary directory for creating archives before upload
+  temp_dir: "/tmp/bck_manager"
+
+  # Log file path
+  log_file: "/var/log/bck_manager.log"
+
+  # Compression format: "tar.gz" | "tar.bz2" | "tar.xz"
+  compression: "tar.gz"
+
+  # Maximum concurrent uploads
+  max_concurrent_uploads: 1
