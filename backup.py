@@ -107,7 +107,19 @@ def run_backup_job(job, config, logger):
 
             logger.info(f"Found {len(files)} file(s) to back up individually.")
 
+            # Build the set of base filenames already present on S3.
+            # An archive key like "prefix/dump_2026-01-15.sql_20260115_030000.tar.gz"
+            # covers the local file "dump_2026-01-15.sql" because the archive name
+            # starts with the original filename followed by "_".
+            already_backed_up = _get_already_backed_up(s3, bucket, prefix, logger)
+
+            skipped_count = 0
             for filename in sorted(files):
+                if _is_already_backed_up(filename, already_backed_up):
+                    logger.info(f"Skipping '{filename}': already present on S3.")
+                    skipped_count += 1
+                    continue
+
                 file_path = os.path.join(source_path, filename)
                 result = _backup_single_file(
                     s3, file_path, bucket, prefix, compression, job_temp_dir, logger
@@ -118,12 +130,47 @@ def run_backup_job(job, config, logger):
                     failed_count += 1
                     success = False
 
+            if skipped_count:
+                logger.info(f"{skipped_count} file(s) skipped (already on S3).")
+
     finally:
         # Cleanup temp directory for this job
         cleanup_temp(job_temp_dir, logger)
 
     logger.info(f"Job '{job_name}' done: {uploaded_count} uploaded, {failed_count} failed.")
     return success
+
+
+def _get_already_backed_up(s3, bucket, prefix, logger):
+    """
+    Return the set of base filenames of archives already stored on S3.
+
+    Each element is the basename of an S3 key under the given prefix
+    (e.g. "dump_2026-01-15.sql_20260115_030000.tar.gz").
+    """
+    try:
+        objects = s3.list_objects(bucket, prefix=prefix)
+        basenames = set()
+        for obj in objects:
+            key = obj["Key"]
+            basenames.add(os.path.basename(key))
+        logger.debug(f"Found {len(basenames)} existing archive(s) on S3 under '{prefix}'.")
+        return basenames
+    except Exception as e:
+        # Non-fatal: if listing fails, proceed without skipping anything.
+        logger.warning(f"Could not list S3 objects for deduplication check: {e}")
+        return set()
+
+
+def _is_already_backed_up(filename, backed_up_basenames):
+    """
+    Return True if *filename* is already covered by an archive on S3.
+
+    The convention is: the archive name is  <original_filename>_<timestamp><ext>
+    so we look for any existing S3 basename that starts with "<filename>_".
+    """
+    prefix_to_match = filename + "_"
+    return any(b.startswith(prefix_to_match) for b in backed_up_basenames)
 
 
 def _backup_folder(s3, source_path, bucket, prefix, compression, temp_dir, logger):

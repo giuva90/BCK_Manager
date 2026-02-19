@@ -27,11 +27,20 @@ Manages compressed backups to any S3-compatible object storage (OVH, AWS S3, Min
 sudo bash install.sh
 ```
 
+The same script handles both **fresh installs** and **updates**.
+It automatically detects whether a previous installation exists under `/opt/bck_manager`.
+
 The installer will:
 1. Install `python3`, `pip`, and `venv` via apt
-2. Copy the application to `/opt/bck_manager`
-3. Create a Python virtual environment with all dependencies
-4. Create the `bck-manager` command in `/usr/local/bin`
+2. Copy all application files to `/opt/bck_manager`
+3. Create (or update) the Python virtual environment with all dependencies
+4. Create (or update) the `bck-manager` command in `/usr/local/bin`
+
+#### Config file handling during updates
+
+When an existing `config.yaml` is found, the script asks whether to overwrite it (default **N**).
+If you choose yes, the old config is automatically backed up as `config.yaml.bak.<timestamp>`
+before being replaced by the example template.
 
 ## Configuration
 
@@ -62,6 +71,19 @@ backup_jobs:
 |------|-------------|
 | `folder` | Compresses the entire directory into a single `.tar.gz` archive |
 | `files` | Compresses each file in the directory separately (useful for DB dump folders) |
+
+#### Deduplication in `files` mode
+
+Before uploading, the tool checks S3 for archives that already cover each local file.
+The match is based on the filename prefix: an archive named `dump_2026-01-15.sql_20260115_030000.tar.gz`
+is considered an existing backup for the local file `dump_2026-01-15.sql`, so that file is skipped.
+
+This is safe because database dump filenames typically embed the date they were created,
+so the same filename will not appear again on future runs. Files that are genuinely new
+(no matching archive on S3) are always uploaded.
+
+If the S3 listing fails for any reason, the check is skipped and **all** files are uploaded
+normally — no silent data loss.
 
 ## Usage
 
