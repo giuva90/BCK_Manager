@@ -77,7 +77,7 @@ def _validate_config(config):
         config["backup_jobs"] = []
 
     for i, job in enumerate(config.get("backup_jobs", [])):
-        required = ["name", "source_path", "bucket", "s3_endpoint", "mode"]
+        required = ["name", "bucket", "s3_endpoint", "mode"]
         for field in required:
             if field not in job or not job[field]:
                 print(
@@ -92,17 +92,41 @@ def _validate_config(config):
             )
             sys.exit(1)
 
-        if job["mode"] not in ("folder", "files"):
+        if job["mode"] not in ("folder", "files", "volume"):
             print(
-                f"[ERROR] Job '{job['name']}': mode must be 'folder' or 'files', "
-                f"got '{job['mode']}'."
+                f"[ERROR] Job '{job['name']}': mode must be 'folder', 'files' "
+                f"or 'volume', got '{job['mode']}'."
             )
             sys.exit(1)
 
+        # Mode-specific validation
+        if job["mode"] in ("folder", "files"):
+            if "source_path" not in job or not job["source_path"]:
+                print(
+                    f"[ERROR] Job '{job['name']}': 'source_path' is required "
+                    f"for mode '{job['mode']}'."
+                )
+                sys.exit(1)
+        elif job["mode"] == "volume":
+            if "volume_name" not in job or not job["volume_name"]:
+                print(
+                    f"[ERROR] Job '{job['name']}': 'volume_name' is required "
+                    f"for mode 'volume'."
+                )
+                sys.exit(1)
+            # source_path is not used for volume mode, set a placeholder
+            job.setdefault("source_path", "")
+
         # Defaults
         job.setdefault("prefix", "")
-        job.setdefault("retention_days", 0)
         job.setdefault("enabled", True)
+        job.setdefault("pre_command", "")
+        job.setdefault("post_command", "")
+
+        # --- Retention normalisation ---
+        # Backward compatibility: convert flat "retention_days" into the
+        # new "retention" dict format (mode: simple).
+        _normalise_retention(job, i)
 
     # Settings defaults
     config.setdefault("settings", {})
@@ -118,6 +142,73 @@ def _validate_config(config):
             f"Use 'tar.gz', 'tar.bz2' or 'tar.xz'."
         )
         sys.exit(1)
+
+
+def _normalise_retention(job, index):
+    """
+    Normalise the retention configuration for a single job.
+
+    Accepts three input styles and converts them all into a single
+    canonical ``retention`` dict attached to the job:
+
+    1. **Legacy flat field** – ``retention_days: 30`` → mode ``simple``.
+    2. **New dict – simple** – ``retention: { mode: simple, days: 30 }``.
+    3. **New dict – smart**  – ``retention: { mode: smart, daily_keep: 15, monthly_keep: 12 }``.
+
+    If neither ``retention`` nor ``retention_days`` is present, the job
+    gets ``retention: { mode: "none" }`` (retention disabled).
+    """
+    job_label = job.get("name", f"#{index + 1}")
+
+    # Already has a retention dict?
+    if "retention" in job and isinstance(job["retention"], dict):
+        ret = job["retention"]
+        mode = ret.get("mode", "simple")
+
+        if mode not in ("none", "simple", "smart"):
+            print(
+                f"[ERROR] Job '{job_label}': retention.mode must be "
+                f"'none', 'simple' or 'smart', got '{mode}'."
+            )
+            sys.exit(1)
+
+        ret["mode"] = mode
+
+        if mode == "simple":
+            ret.setdefault("days", 0)
+            if not isinstance(ret["days"], (int, float)) or ret["days"] < 0:
+                print(f"[ERROR] Job '{job_label}': retention.days must be >= 0.")
+                sys.exit(1)
+            ret["days"] = int(ret["days"])
+
+        elif mode == "smart":
+            ret.setdefault("daily_keep", 7)
+            ret.setdefault("monthly_keep", 0)
+            for fld in ("daily_keep", "monthly_keep"):
+                if not isinstance(ret[fld], (int, float)) or ret[fld] < 0:
+                    print(f"[ERROR] Job '{job_label}': retention.{fld} must be >= 0.")
+                    sys.exit(1)
+                ret[fld] = int(ret[fld])
+
+        # Remove the legacy key if present alongside the new dict
+        job.pop("retention_days", None)
+        return
+
+    # Legacy flat field?
+    if "retention_days" in job:
+        days = job.pop("retention_days", 0)
+        if not isinstance(days, (int, float)) or days < 0:
+            print(f"[ERROR] Job '{job_label}': retention_days must be >= 0.")
+            sys.exit(1)
+        days = int(days)
+        job["retention"] = {
+            "mode": "simple" if days > 0 else "none",
+            "days": days,
+        }
+        return
+
+    # Nothing specified → disabled
+    job["retention"] = {"mode": "none"}
 
 
 def get_endpoint_config(config, endpoint_name):

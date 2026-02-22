@@ -8,6 +8,15 @@ import os
 from s3_client import S3Client
 from config_loader import get_endpoint_config
 from utils import extract_archive, cleanup_temp, format_size
+from docker_utils import (
+    docker_available,
+    volume_exists,
+    get_containers_using_volume,
+    all_containers_stopped,
+    create_volume,
+    remove_volume,
+    restore_volume_from_archive,
+)
 
 
 def list_remote_backups(job, config, logger):
@@ -182,3 +191,95 @@ def list_bucket_contents(endpoint_name, bucket_name, prefix, config, logger):
     except Exception as e:
         logger.error(f"Error listing objects in {bucket_name}: {e}")
         return []
+
+
+# ============================================================================
+# Docker volume restore
+# ============================================================================
+
+
+def restore_volume(job, config, s3_key, target_volume, replace_mode, logger):
+    """
+    Restore a Docker volume from an S3 archive.
+
+    Args:
+        job: Backup job configuration dict.
+        config: Full application configuration.
+        s3_key: The S3 key of the archive to restore.
+        target_volume: Name of the Docker volume to restore into.
+        replace_mode: If True, delete the existing volume first and
+                      recreate it with the same name.
+                      If False, create a brand-new volume with *target_volume*.
+        logger: Logger instance.
+
+    Returns:
+        True if successful, False otherwise.
+    """
+    bucket = job["bucket"]
+    temp_dir = config["settings"]["temp_dir"]
+    compression = config["settings"]["compression"]
+
+    logger.info("=" * 50)
+    logger.info(f"VOLUME RESTORE: {s3_key}")
+    logger.info(f"  From   : s3://{bucket}/{s3_key}")
+    logger.info(f"  Volume : {target_volume}")
+    logger.info(f"  Mode   : {'replace' if replace_mode else 'new volume'}")
+    logger.info("=" * 50)
+
+    if not docker_available(logger):
+        logger.error("Docker is not available.")
+        return False
+
+    ep_config = get_endpoint_config(config, job["s3_endpoint"])
+    if not ep_config:
+        logger.error(f"S3 endpoint '{job['s3_endpoint']}' not found.")
+        return False
+
+    # Create temp directory for download
+    restore_temp = os.path.join(temp_dir, "restore_volume")
+    os.makedirs(restore_temp, exist_ok=True)
+
+    archive_filename = os.path.basename(s3_key)
+    local_archive_path = os.path.join(restore_temp, archive_filename)
+
+    try:
+        s3 = S3Client(
+            endpoint_url=ep_config["endpoint_url"],
+            access_key=ep_config["access_key"],
+            secret_key=ep_config["secret_key"],
+            region=ep_config["region"],
+            logger=logger,
+        )
+
+        # Download the archive
+        s3.download_file(bucket, s3_key, local_archive_path)
+
+        # Handle volumes
+        if replace_mode:
+            # Remove existing volume
+            if volume_exists(target_volume, logger):
+                remove_volume(target_volume, logger)
+            # Create fresh volume
+            create_volume(target_volume, logger)
+        else:
+            # Create new volume (must not exist)
+            if volume_exists(target_volume, logger):
+                logger.error(f"Volume '{target_volume}' already exists.")
+                return False
+            create_volume(target_volume, logger)
+
+        # Populate the volume from the archive
+        restore_volume_from_archive(
+            local_archive_path, target_volume, compression, logger
+        )
+
+        logger.info(f"Volume restore complete: {target_volume}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error during volume restore of {s3_key}: {e}")
+        return False
+
+    finally:
+        # Always clean up downloaded archive
+        cleanup_temp(restore_temp, logger)

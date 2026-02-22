@@ -46,14 +46,26 @@ class S3Client:
             raise
 
     def list_objects(self, bucket, prefix="", max_keys=1000):
-        """List objects in a bucket with optional prefix filter."""
+        """List objects in a bucket with optional prefix filter.
+
+        Args:
+            bucket: S3 bucket name.
+            prefix: Key prefix to filter objects.
+            max_keys: Maximum number of objects to return.
+                      Use 0 to list ALL objects (no limit).
+        """
         try:
             objects = []
             paginator = self._client.get_paginator("list_objects_v2")
+
+            pagination_config = {}
+            if max_keys > 0:
+                pagination_config["MaxItems"] = max_keys
+
             page_iterator = paginator.paginate(
                 Bucket=bucket,
                 Prefix=prefix,
-                PaginationConfig={"MaxItems": max_keys},
+                PaginationConfig=pagination_config,
             )
             for page in page_iterator:
                 for obj in page.get("Contents", []):

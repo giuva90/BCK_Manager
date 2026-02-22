@@ -23,14 +23,29 @@ s3_endpoints:
 # --- Backup Jobs ---
 # Fields:
 #   name           : Unique descriptive name for this job
-#   source_path    : Absolute path on the server to back up
+#   source_path    : Absolute path on the server to back up (for folder/files modes)
+#   volume_name    : Docker volume name to back up (for volume mode)
 #   bucket         : Target S3 bucket name
 #   s3_endpoint    : Name of the S3 endpoint (must match one above)
 #   prefix         : S3 key prefix (subfolder inside the bucket)
 #   mode           : "folder" = compress entire folder as one archive
 #                    "files"  = compress each file individually
-#   retention_days : How many days to keep backups on S3 (0 = keep forever)
+#                    "volume" = backup a Docker volume
+#   pre_command     : (optional) Shell command to run BEFORE the backup
+#   post_command    : (optional) Shell command to run AFTER the backup
+#   retention       : Retention policy (see modes below)
 #   enabled        : true/false to quickly enable/disable a job
+#
+# Retention modes:
+#   mode: "none"    → keep everything forever (default)
+#   mode: "simple"  → delete backups older than N days
+#       days: 30
+#   mode: "smart"   → keep last N daily backups + last backup of each
+#                     of the previous M months
+#       daily_keep: 15
+#       monthly_keep: 12
+#
+# Legacy format "retention_days: 30" is still supported (treated as simple).
 
 backup_jobs:
   - name: "app-data"
@@ -39,7 +54,9 @@ backup_jobs:
     s3_endpoint: "ovh-gra"
     prefix: "app-data"
     mode: "folder"
-    retention_days: 30
+    retention:
+      mode: "simple"
+      days: 30
     enabled: true
 
   - name: "db-dumps"
@@ -48,7 +65,10 @@ backup_jobs:
     s3_endpoint: "ovh-gra"
     prefix: "db-dumps"
     mode: "files"
-    retention_days: 90
+    retention:
+      mode: "smart"
+      daily_keep: 15
+      monthly_keep: 12
     enabled: true
 
   - name: "docker-compose-configs"
@@ -57,7 +77,23 @@ backup_jobs:
     s3_endpoint: "ovh-gra"
     prefix: "docker-configs"
     mode: "folder"
-    retention_days: 60
+    retention:
+      mode: "simple"
+      days: 60
+    enabled: true
+
+  - name: "postgres-volume"
+    volume_name: "myapp_postgres_data"
+    bucket: "my-backups"
+    s3_endpoint: "ovh-gra"
+    prefix: "postgres-volume"
+    mode: "volume"
+    pre_command: "docker stop myapp_postgres_1"
+    post_command: "docker start myapp_postgres_1"
+    retention:
+      mode: "smart"
+      daily_keep: 7
+      monthly_keep: 6
     enabled: true
 
 # --- General Settings ---

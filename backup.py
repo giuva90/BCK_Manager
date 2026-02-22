@@ -4,10 +4,13 @@ Handles backup operations: compress and upload to S3.
 """
 
 import os
+import subprocess
 from datetime import datetime
 
 from s3_client import S3Client
 from config_loader import get_endpoint_config
+from retention import apply_retention
+from docker_utils import backup_volume, docker_available, volume_exists
 from utils import (
     compress_folder,
     compress_single_file,
@@ -30,24 +33,43 @@ def run_backup_job(job, config, logger):
         True if successful, False otherwise.
     """
     job_name = job["name"]
-    source_path = job["source_path"]
+    source_path = job.get("source_path", "")
+    volume_name = job.get("volume_name", "")
     bucket = job["bucket"]
     prefix = job.get("prefix", "")
     mode = job["mode"]
     compression = config["settings"]["compression"]
     temp_dir = config["settings"]["temp_dir"]
 
+    pre_command = job.get("pre_command", "")
+    post_command = job.get("post_command", "")
+
     logger.info("=" * 50)
     logger.info(f"BACKUP JOB: {job_name}")
-    logger.info(f"  Source : {source_path}")
+    if mode == "volume":
+        logger.info(f"  Volume : {volume_name}")
+    else:
+        logger.info(f"  Source : {source_path}")
     logger.info(f"  Bucket : {bucket}/{prefix}")
     logger.info(f"  Mode   : {mode}")
+    if pre_command:
+        logger.info(f"  Pre-cmd: {pre_command}")
+    if post_command:
+        logger.info(f"  Post-cmd: {post_command}")
     logger.info("=" * 50)
 
-    # Validate source path
-    if not os.path.exists(source_path):
-        logger.error(f"Source path not found: {source_path}")
-        return False
+    # Validate source
+    if mode == "volume":
+        if not docker_available(logger):
+            logger.error("Docker is not available.")
+            return False
+        if not volume_exists(volume_name, logger):
+            logger.error(f"Docker volume not found: {volume_name}")
+            return False
+    else:
+        if not os.path.exists(source_path):
+            logger.error(f"Source path not found: {source_path}")
+            return False
 
     # Initialize S3 client
     ep_config = get_endpoint_config(config, job["s3_endpoint"])
@@ -67,6 +89,11 @@ def run_backup_job(job, config, logger):
         logger.error(f"Unable to connect to S3 endpoint: {e}")
         return False
 
+    # --- Execute pre-command hook ---
+    if pre_command:
+        if not _run_hook("pre_command", pre_command, job_name, logger):
+            return False
+
     # Create temp directory for this job
     job_temp_dir = os.path.join(temp_dir, job_name)
     os.makedirs(job_temp_dir, exist_ok=True)
@@ -76,7 +103,17 @@ def run_backup_job(job, config, logger):
     failed_count = 0
 
     try:
-        if mode == "folder":
+        if mode == "volume":
+            # Backup Docker volume
+            success = _backup_docker_volume(
+                s3, volume_name, bucket, prefix, compression, job_temp_dir, logger
+            )
+            if success:
+                uploaded_count = 1
+            else:
+                failed_count = 1
+
+        elif mode == "folder":
             # Compress entire folder as one archive
             success = _backup_folder(
                 s3, source_path, bucket, prefix, compression, job_temp_dir, logger
@@ -138,7 +175,69 @@ def run_backup_job(job, config, logger):
         cleanup_temp(job_temp_dir, logger)
 
     logger.info(f"Job '{job_name}' done: {uploaded_count} uploaded, {failed_count} failed.")
+
+    # --- Execute post-command hook (always, even on failure) ---
+    if post_command:
+        _run_hook("post_command", post_command, job_name, logger)
+
+    # --- Apply retention policy after a successful backup ---
+    if success:
+        try:
+            kept, deleted = apply_retention(job, config, logger)
+            if deleted:
+                logger.info(
+                    f"Retention applied for '{job_name}': "
+                    f"{kept} kept, {deleted} deleted."
+                )
+        except Exception as e:
+            logger.error(f"Retention error for '{job_name}': {e}")
+
     return success
+
+
+def _run_hook(hook_name, command, job_name, logger):
+    """
+    Execute a shell hook command.
+
+    Args:
+        hook_name: Label for logging ("pre_command" or "post_command").
+        command: Shell command string to execute.
+        job_name: Job name for log context.
+        logger: Logger instance.
+
+    Returns:
+        True if the command succeeded (exit code 0), False otherwise.
+    """
+    logger.info(f"[{hook_name}] Job '{job_name}': running → {command}")
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 min safety timeout
+        )
+        if result.stdout.strip():
+            logger.info(f"[{hook_name}] stdout: {result.stdout.strip()}")
+        if result.stderr.strip():
+            logger.warning(f"[{hook_name}] stderr: {result.stderr.strip()}")
+
+        if result.returncode != 0:
+            logger.error(
+                f"[{hook_name}] Job '{job_name}': command failed "
+                f"(exit code {result.returncode}): {command}"
+            )
+            return False
+
+        logger.info(f"[{hook_name}] Job '{job_name}': command completed successfully.")
+        return True
+
+    except subprocess.TimeoutExpired:
+        logger.error(f"[{hook_name}] Job '{job_name}': command timed out (600s): {command}")
+        return False
+    except Exception as e:
+        logger.error(f"[{hook_name}] Job '{job_name}': command error: {e}")
+        return False
 
 
 def _get_already_backed_up(s3, bucket, prefix, logger):
@@ -171,6 +270,28 @@ def _is_already_backed_up(filename, backed_up_basenames):
     """
     prefix_to_match = filename + "_"
     return any(b.startswith(prefix_to_match) for b in backed_up_basenames)
+
+
+def _backup_docker_volume(s3, volume_name, bucket, prefix, compression, temp_dir, logger):
+    """Backup a Docker volume: compress via container, upload, clean up."""
+    archive_path = None
+    try:
+        archive_path = backup_volume(volume_name, temp_dir, compression, logger)
+        archive_name = os.path.basename(archive_path)
+
+        # Build S3 key
+        s3_key = f"{prefix}/{archive_name}" if prefix else archive_name
+
+        s3.upload_file(archive_path, bucket, s3_key)
+        return True
+
+    except Exception as e:
+        logger.error(f"Error backing up volume {volume_name}: {e}")
+        return False
+    finally:
+        # Always remove local archive – nothing should remain on disk
+        if archive_path and os.path.exists(archive_path):
+            cleanup_temp(archive_path, logger)
 
 
 def _backup_folder(s3, source_path, bucket, prefix, compression, temp_dir, logger):
