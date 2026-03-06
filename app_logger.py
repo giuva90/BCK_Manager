@@ -9,10 +9,12 @@ import sys
 from datetime import datetime
 
 
-def setup_logger(log_file="/var/log/bck_manager.log"):
+def setup_logger(log_file="/var/log/bck_manager.log", debug=False):
     """
     Configure and return the application logger.
     Logs to both file and stdout.
+    When *debug* is True the console handler is lowered to DEBUG level,
+    showing verbose output including full SMTP session details.
     """
     logger = logging.getLogger("bck_manager")
     logger.setLevel(logging.DEBUG)
@@ -52,7 +54,7 @@ def setup_logger(log_file="/var/log/bck_manager.log"):
 
     # --- Console handler (stdout) ---
     ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
+    ch.setLevel(logging.DEBUG if debug else logging.INFO)
     ch.setFormatter(fmt)
     logger.addHandler(ch)
 

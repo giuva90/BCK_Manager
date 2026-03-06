@@ -766,13 +766,20 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sudo python3 bck_manager.py                         # Interactive mode
-  sudo python3 bck_manager.py --run-all                # Run all backup jobs
-  sudo python3 bck_manager.py --run-job app-data       # Run a specific job
-  sudo python3 bck_manager.py --apply-retention        # Apply retention policies
-  sudo python3 bck_manager.py --apply-retention --dry  # Preview retention (no delete)
-  sudo python3 bck_manager.py --restore-volume <job>   # Restore a Docker volume (interactive)
-  sudo python3 bck_manager.py --list-jobs              # List configured jobs
+  sudo python3 bck_manager.py                               # Interactive mode
+  sudo python3 bck_manager.py --run-all                     # Run all backup jobs
+  sudo python3 bck_manager.py --run-job app-data            # Run a specific job
+  sudo python3 bck_manager.py --apply-retention             # Apply retention policies
+  sudo python3 bck_manager.py --apply-retention --dry       # Preview retention (no delete)
+  sudo python3 bck_manager.py --restore-volume <job>        # Restore a Docker volume (interactive)
+  sudo python3 bck_manager.py --list-jobs                   # List configured jobs
+
+  # --debug can be combined with ANY command above for verbose output:
+  sudo python3 bck_manager.py --run-all --debug
+  sudo python3 bck_manager.py --run-job app-data --debug
+  sudo python3 bck_manager.py --apply-retention --debug
+  sudo python3 bck_manager.py --restore-volume <job> --debug
+  sudo python3 bck_manager.py --list-jobs --debug
         """,
     )
     parser.add_argument(
@@ -819,6 +826,15 @@ Examples:
         action="version",
         version=f"{APP_NAME} v{APP_VERSION}",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Enable verbose DEBUG output on the console. "
+            "Can be combined with any command. "
+            "Includes full SMTP session log and raw email content."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -832,7 +848,7 @@ def main():
 
     # Setup logging
     log_file = config.get("settings", {}).get("log_file", "/var/log/bck_manager.log")
-    logger = setup_logger(log_file)
+    logger = setup_logger(log_file, debug=args.debug)
 
     # ── Non-interactive: --list-jobs ──
     if args.list_jobs:

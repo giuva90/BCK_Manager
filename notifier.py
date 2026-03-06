@@ -12,9 +12,12 @@ Features:
     status, total bucket/prefix size, error details on failure.
 """
 
+import logging
 import smtplib
 import socket
 import ssl
+import uuid
+from email import utils as email_utils
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -53,6 +56,14 @@ def send_backup_report(job_results, config, logger):
         logger.debug("[notifier] No SMTP configuration found, skipping email.")
         return
 
+    logger.debug(
+        f"[notifier] SMTP config: host={smtp_config.get('host')!r}, "
+        f"port={smtp_config.get('port')}, "
+        f"username={smtp_config.get('username')!r}, "
+        f"use_ssl={smtp_config.get('use_ssl')}, "
+        f"from_address={smtp_config.get('from_address')!r}"
+    )
+
     if not notif_config.get("enabled", False):
         logger.debug("[notifier] Email notifications are disabled.")
         return
@@ -62,6 +73,7 @@ def send_backup_report(job_results, config, logger):
         return
 
     default_recipients = notif_config.get("recipients", [])
+    logger.debug(f"[notifier] Default recipients: {default_recipients}")
 
     # Build recipient → list-of-job-results mapping
     recipient_jobs = _build_recipient_map(job_results, default_recipients)
@@ -69,6 +81,11 @@ def send_backup_report(job_results, config, logger):
     if not recipient_jobs:
         logger.info("[notifier] No recipients to notify.")
         return
+
+    logger.debug(
+        f"[notifier] Recipient map: "
+        + str({r: [j.get('job_name') for j in jobs] for r, jobs in recipient_jobs.items()})
+    )
 
     sent = 0
     failed = 0
@@ -79,12 +96,25 @@ def send_backup_report(job_results, config, logger):
             _send_email(recipient, visible_results, smtp_config, logger)
             sent += 1
         except Exception as e:
-            logger.error(f"[notifier] Failed to send email to {recipient}: {e}")
+            logger.error(f"[notifier] Failed to send email to {recipient}: {e}", exc_info=_is_debug(logger))
             failed += 1
 
     logger.info(
         f"[notifier] Email report: {sent} sent, {failed} failed "
         f"({len(recipient_jobs)} recipient(s) total)."
+    )
+
+
+# ============================================================================
+# Debug helper
+# ============================================================================
+
+
+def _is_debug(logger):
+    """Return True if the console (StreamHandler) is set to DEBUG level."""
+    return any(
+        type(h) is logging.StreamHandler and h.level <= logging.DEBUG
+        for h in logger.handlers
     )
 
 
@@ -140,34 +170,46 @@ def _send_email(recipient, job_results, smtp_config, logger):
     from_addr = smtp_config.get("from_address", smtp_config.get("username", ""))
     subject = _build_subject(job_results)
     html_body = _generate_html(job_results)
+    text_body = _generate_plaintext(job_results)
 
     msg = MIMEMultipart("alternative")
     msg["From"] = from_addr
     msg["To"] = recipient
     msg["Subject"] = subject
+    msg["Date"] = email_utils.formatdate(localtime=True)
+    msg["Message-ID"] = email_utils.make_msgid(domain=from_addr.split("@")[-1].rstrip(">"))
+    # text/plain MUST come before text/html so clients prefer HTML
+    # but spam filters see the plain-text alternative
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     host = smtp_config["host"]
-    port = smtp_config.get("port", 587)
+    port = smtp_config.get("port", 465)
     username = smtp_config.get("username", "")
     password = smtp_config.get("password", "")
-    use_tls = smtp_config.get("use_tls", True)
+    use_ssl = smtp_config.get("use_ssl", True)
+    debug_mode = _is_debug(logger)
 
     logger.info(f"[notifier] Sending email to {recipient} via {host}:{port}")
+    logger.debug(f"[notifier] use_ssl={use_ssl}, from={from_addr!r}, subject={subject!r}")
+    logger.debug(f"[notifier] Full raw message:\n{'='*60}\n{msg.as_string()}\n{'='*60}")
 
-    if use_tls:
+    if use_ssl:
         context = ssl.create_default_context()
-        with smtplib.SMTP(host, port, timeout=30) as server:
-            server.ehlo()
-            server.starttls(context=context)
-            server.ehlo()
+        with smtplib.SMTP_SSL(host, port, context=context, timeout=30) as server:
+            if debug_mode:
+                server.set_debuglevel(2)
             if username and password:
+                logger.debug(f"[notifier] Authenticating as {username!r}")
                 server.login(username, password)
             server.sendmail(from_addr, [recipient], msg.as_string())
     else:
         with smtplib.SMTP(host, port, timeout=30) as server:
+            if debug_mode:
+                server.set_debuglevel(2)
             server.ehlo()
             if username and password:
+                logger.debug(f"[notifier] Authenticating as {username!r}")
                 server.login(username, password)
             server.sendmail(from_addr, [recipient], msg.as_string())
 
@@ -183,11 +225,53 @@ def _build_subject(job_results):
     hostname = _get_hostname()
 
     if failed == 0:
-        return f"✓ BCK Manager [{hostname}] — All {total} backup(s) succeeded"
+        return f"[OK] BCK Manager [{hostname}] - All {total} backup(s) succeeded"
     elif ok == 0:
-        return f"✗ BCK Manager [{hostname}] — All {total} backup(s) FAILED"
+        return f"[FAILED] BCK Manager [{hostname}] - All {total} backup(s) FAILED"
     else:
-        return f"⚠ BCK Manager [{hostname}] — {ok}/{total} OK, {failed} FAILED"
+        return f"[WARNING] BCK Manager [{hostname}] - {ok}/{total} OK, {failed} FAILED"
+
+
+# ============================================================================
+# Plain-text fallback (improves deliverability)
+# ============================================================================
+
+
+def _generate_plaintext(job_results):
+    """
+    Generate a minimal plain-text version of the report.
+    This is required as a multipart/alternative counterpart to the HTML body
+    so that spam filters do not flag the message as HTML-only.
+    """
+    total = len(job_results)
+    ok = sum(1 for r in job_results if r.get("success"))
+    failed = total - ok
+    hostname = _get_hostname()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    lines = [
+        "BCK Manager - Backup Report",
+        f"Server: {hostname}  |  Date: {now_str}",
+        "-" * 50,
+        f"Summary: {ok}/{total} succeeded, {failed} failed.",
+        "-" * 50,
+    ]
+    for r in job_results:
+        status = "OK" if r.get("success") else "FAILED"
+        lines.append(f"\nJob: {r.get('job_name', '?')}  [{status}]")
+        lines.append(f"  Bucket : {r.get('bucket', '?')}/{r.get('prefix', '')}")
+        files = r.get("uploaded_files", [])
+        if files:
+            for f in files:
+                lines.append(f"  File   : {f.get('key', '?')} ({f.get('size_human', '?')})")
+        else:
+            lines.append("  Files  : (none)")
+        if not r.get("success") and r.get("error"):
+            lines.append(f"  Error  : {r.get('error')}")
+
+    lines.append("\n" + "-" * 50)
+    lines.append("BCK Manager - Backup Manager for Docker Infrastructure")
+    return "\n".join(lines)
 
 
 # ============================================================================

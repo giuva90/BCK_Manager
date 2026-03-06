@@ -173,10 +173,10 @@ settings:
 
 smtp:
   host: "smtp.example.com"
-  port: 587
+  port: 465
   username: "alerts@example.com"
   password: "YOUR_SMTP_PASSWORD"
-  use_tls: true
+  use_ssl: true
   from_address: "BCK Manager <alerts@example.com>"
 
 # --- Email Notifications (optional) ---

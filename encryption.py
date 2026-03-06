@@ -347,7 +347,7 @@ def get_encryption_config(job, config):
 
     # Resolve passphrase: inline or from named key
     passphrase = enc.get("passphrase", "")
-    key_name = enc.get("key_name", "")
+    key_name = enc.get("key_name") or enc.get("key-name", "")
 
     if key_name and not passphrase:
         # Look up in global encryption_keys

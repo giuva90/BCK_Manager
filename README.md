@@ -68,10 +68,10 @@ encryption_keys:
 
 smtp:
   host: "smtp.example.com"
-  port: 587
+  port: 465
   username: "alerts@example.com"
   password: "YOUR_SMTP_PASSWORD"
-  use_tls: true
+  use_ssl: true
   from_address: "BCK Manager <alerts@example.com>"
 
 notifications:
@@ -256,10 +256,10 @@ Define a global SMTP server in `config.yaml`:
 ```yaml
 smtp:
   host: "smtp.example.com"
-  port: 587
+  port: 465
   username: "alerts@example.com"
   password: "YOUR_SMTP_PASSWORD"
-  use_tls: true
+  use_ssl: true
   from_address: "BCK Manager <alerts@example.com>"
 ```
 
@@ -489,6 +489,14 @@ sudo bck-manager --list-jobs
 
 # Use a different config file
 sudo bck-manager --config /path/to/config.yaml
+
+# Verbose debug output (shows full SMTP session, raw email, etc.)
+# --debug can be combined with ANY command:
+sudo bck-manager --run-all --debug
+sudo bck-manager --run-job app-data --debug
+sudo bck-manager --apply-retention --debug
+sudo bck-manager --restore-volume postgres-volume --debug
+sudo bck-manager --list-jobs --debug
 ```
 
 ### Schedule with cron

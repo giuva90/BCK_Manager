@@ -263,7 +263,7 @@ def _normalise_encryption(job, index, config):
 
     # Resolve passphrase
     passphrase = enc.get("passphrase", "")
-    key_name = enc.get("key_name", "")
+    key_name = enc.get("key_name") or enc.get("key-name", "")
 
     if key_name and not passphrase:
         # Look up in global encryption_keys
