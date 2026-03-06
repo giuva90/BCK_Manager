@@ -20,6 +20,26 @@ s3_endpoints:
   #   secret_key: "ANOTHER_SECRET_KEY"
   #   region: "sbg"
 
+# --- Encryption Keys (optional) ---
+# Define named encryption keys here and reference them in backup jobs.
+# This avoids repeating the same passphrase across multiple jobs and
+# lets you use different keys for different data sensitivity levels.
+#
+# IMPORTANT: These passphrases are the ONLY way to decrypt your backups.
+#            Store them securely (password manager, vault, etc.).
+#            If you lose a passphrase, the encrypted backups are UNRECOVERABLE.
+#
+# Each job can also define an inline passphrase instead of referencing
+# a named key — see the backup_jobs examples below.
+
+encryption_keys:
+  - name: "production-key"
+    passphrase: "YOUR_STRONG_PASSPHRASE_HERE"
+
+  # Example: a separate key for less sensitive data
+  # - name: "logs-key"
+  #   passphrase: "ANOTHER_PASSPHRASE_HERE"
+
 # --- Backup Jobs ---
 # Fields:
 #   name           : Unique descriptive name for this job
@@ -34,6 +54,7 @@ s3_endpoints:
 #   pre_command     : (optional) Shell command to run BEFORE the backup
 #   post_command    : (optional) Shell command to run AFTER the backup
 #   retention       : Retention policy (see modes below)
+#   encryption      : (optional) Encryption settings (see below)
 #   enabled        : true/false to quickly enable/disable a job
 #
 # Retention modes:
@@ -46,6 +67,18 @@ s3_endpoints:
 #       monthly_keep: 12
 #
 # Legacy format "retention_days: 30" is still supported (treated as simple).
+#
+# Encryption:
+#   enabled: true/false   → enable/disable encryption for this job
+#   algorithm: "AES-256-GCM"  → encryption algorithm (only AES-256-GCM supported)
+#   passphrase: "..."     → inline passphrase (alternative to key_name)
+#   key_name: "..."       → reference a named key from encryption_keys above
+#
+# When encryption is enabled with pre/post commands, a 2-step flow is used:
+#   Step 1: pre_command → create local archive → post_command
+#           (services restart immediately after the local copy is made)
+#   Step 2: encrypt → upload to S3 → cleanup
+#           (time-consuming operations happen while services are running)
 
 backup_jobs:
   - name: "app-data"
@@ -69,6 +102,15 @@ backup_jobs:
       mode: "smart"
       daily_keep: 15
       monthly_keep: 12
+    # Encryption with a named key (shared across jobs)
+    encryption:
+      enabled: true
+      algorithm: "AES-256-GCM"
+      key_name: "production-key"
+    # Per-job notification: additional recipients (added to the default list)
+    notifications:
+      additional_recipients:
+        - "dba@example.com"
     enabled: true
 
   - name: "docker-compose-configs"
@@ -80,6 +122,7 @@ backup_jobs:
     retention:
       mode: "simple"
       days: 60
+    # No encryption for non-sensitive config files
     enabled: true
 
   - name: "postgres-volume"
@@ -94,6 +137,16 @@ backup_jobs:
       mode: "smart"
       daily_keep: 7
       monthly_keep: 6
+    # Encryption with an inline passphrase (unique to this job)
+    encryption:
+      enabled: true
+      algorithm: "AES-256-GCM"
+      passphrase: "my-postgres-backup-secret"
+    # Per-job notification: exclusive recipients (replace default list;
+    # default recipients will NOT see this job in their report)
+    notifications:
+      exclusive_recipients:
+        - "dba-team@example.com"
     enabled: true
 
 # --- General Settings ---
@@ -109,3 +162,31 @@ settings:
 
   # Maximum concurrent uploads
   max_concurrent_uploads: 1
+
+# --- SMTP Configuration (optional) ---
+# Configure an SMTP server to receive email reports after non-interactive
+# backup runs (--run-all / --run-job).  Emails are never sent in
+# interactive mode.
+#
+# If this section is absent or commented out, email notifications are
+# disabled.
+
+smtp:
+  host: "smtp.example.com"
+  port: 465
+  username: "alerts@example.com"
+  password: "YOUR_SMTP_PASSWORD"
+  use_ssl: true
+  from_address: "BCK Manager <alerts@example.com>"
+
+# --- Email Notifications (optional) ---
+# Global on/off switch and default recipient list.
+# Every enabled job's results are sent to these recipients, unless the
+# job defines exclusive_recipients (in which case default recipients do
+# NOT receive that job's results).
+
+notifications:
+  enabled: true
+  recipients:
+    - "admin@example.com"
+    - "ops-team@example.com"

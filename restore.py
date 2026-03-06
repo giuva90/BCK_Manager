@@ -1,12 +1,14 @@
 """
 BCK Manager - Restore Module
 Handles listing remote backups and restoring files from S3.
+Supports automatic decryption of encrypted archives.
 """
 
 import os
 
 from s3_client import S3Client
 from config_loader import get_endpoint_config
+from encryption import decrypt_file, is_encrypted_file, get_encryption_config
 from utils import extract_archive, cleanup_temp, format_size
 from docker_utils import (
     docker_available,
@@ -56,10 +58,15 @@ def list_remote_backups(job, config, logger):
 
 def restore_file(job, config, s3_key, logger):
     """
-    Restore (download and extract) a single backup archive from S3.
+    Restore (download, optionally decrypt, and extract) a single backup
+    archive from S3.
 
     The archive is extracted back to the original source_path defined in the job.
     The file is NOT deleted from S3 after restore.
+
+    If the downloaded file is encrypted (detected by the BCK Manager
+    encryption header), it is automatically decrypted using the passphrase
+    from the job's encryption configuration.
 
     Args:
         job: Backup job configuration dict.
@@ -103,6 +110,20 @@ def restore_file(job, config, s3_key, logger):
 
         # Download the archive
         s3.download_file(bucket, s3_key, local_archive_path)
+
+        # --- Decrypt if needed ---
+        if is_encrypted_file(local_archive_path):
+            enc_config = get_encryption_config(job, config)
+            if not enc_config.get("enabled") or not enc_config.get("passphrase"):
+                logger.error(
+                    "Archive is encrypted but no passphrase is configured "
+                    "for this job. Cannot decrypt."
+                )
+                return False
+            logger.info("[encryption] Encrypted archive detected, decrypting...")
+            local_archive_path = decrypt_file(
+                local_archive_path, enc_config["passphrase"], logger
+            )
 
         # Ensure destination directory exists
         os.makedirs(source_path, exist_ok=True)
@@ -202,6 +223,8 @@ def restore_volume(job, config, s3_key, target_volume, replace_mode, logger):
     """
     Restore a Docker volume from an S3 archive.
 
+    Supports automatic decryption of encrypted archives.
+
     Args:
         job: Backup job configuration dict.
         config: Full application configuration.
@@ -253,6 +276,20 @@ def restore_volume(job, config, s3_key, target_volume, replace_mode, logger):
 
         # Download the archive
         s3.download_file(bucket, s3_key, local_archive_path)
+
+        # --- Decrypt if needed ---
+        if is_encrypted_file(local_archive_path):
+            enc_config = get_encryption_config(job, config)
+            if not enc_config.get("enabled") or not enc_config.get("passphrase"):
+                logger.error(
+                    "Archive is encrypted but no passphrase is configured "
+                    "for this job. Cannot decrypt."
+                )
+                return False
+            logger.info("[encryption] Encrypted archive detected, decrypting...")
+            local_archive_path = decrypt_file(
+                local_archive_path, enc_config["passphrase"], logger
+            )
 
         # Handle volumes
         if replace_mode:

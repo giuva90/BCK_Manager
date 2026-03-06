@@ -46,6 +46,7 @@ Thumbs.db
 *.tar.gz
 *.tar.bz2
 *.tar.xz
+*.enc
 
 # --- pytest / coverage ---
 .pytest_cache/

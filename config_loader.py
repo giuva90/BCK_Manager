@@ -128,6 +128,9 @@ def _validate_config(config):
         # new "retention" dict format (mode: simple).
         _normalise_retention(job, i)
 
+        # --- Encryption normalisation ---
+        _normalise_encryption(job, i, config)
+
     # Settings defaults
     config.setdefault("settings", {})
     config["settings"].setdefault("temp_dir", "/tmp/bck_manager")
@@ -142,6 +145,12 @@ def _validate_config(config):
             f"Use 'tar.gz', 'tar.bz2' or 'tar.xz'."
         )
         sys.exit(1)
+
+    # SMTP defaults (optional section)
+    _normalise_smtp(config)
+
+    # Notifications defaults (optional section)
+    _normalise_notifications(config)
 
 
 def _normalise_retention(job, index):
@@ -209,6 +218,169 @@ def _normalise_retention(job, index):
 
     # Nothing specified → disabled
     job["retention"] = {"mode": "none"}
+
+
+def _normalise_encryption(job, index, config):
+    """
+    Normalise the encryption configuration for a single job.
+
+    Accepts these input styles:
+
+    1. **No encryption** – field absent or ``encryption: { enabled: false }``
+       → sets ``encryption: { enabled: false }``.
+
+    2. **Inline passphrase** –
+       ``encryption: { enabled: true, passphrase: "...", algorithm: "AES-256-GCM" }``
+
+    3. **Named key reference** –
+       ``encryption: { enabled: true, key_name: "my-key" }``
+       The key is resolved from the top-level ``encryption_keys`` list.
+
+    Validates algorithm and passphrase availability.
+    """
+    from encryption import SUPPORTED_ALGORITHMS
+
+    job_label = job.get("name", f"#{index + 1}")
+
+    enc = job.get("encryption")
+    if enc is None or not isinstance(enc, dict):
+        job["encryption"] = {"enabled": False}
+        return
+
+    if not enc.get("enabled", False):
+        enc["enabled"] = False
+        return
+
+    # Algorithm validation
+    algorithm = enc.get("algorithm", "AES-256-GCM")
+    if algorithm not in SUPPORTED_ALGORITHMS:
+        print(
+            f"[ERROR] Job '{job_label}': encryption.algorithm must be one of "
+            f"{', '.join(sorted(SUPPORTED_ALGORITHMS))}, got '{algorithm}'."
+        )
+        sys.exit(1)
+    enc["algorithm"] = algorithm
+
+    # Resolve passphrase
+    passphrase = enc.get("passphrase", "")
+    key_name = enc.get("key_name") or enc.get("key-name", "")
+
+    if key_name and not passphrase:
+        # Look up in global encryption_keys
+        found = False
+        for ek in config.get("encryption_keys", []):
+            if ek.get("name") == key_name:
+                passphrase = ek.get("passphrase", "")
+                found = True
+                break
+        if not found:
+            print(
+                f"[ERROR] Job '{job_label}': encryption.key_name '{key_name}' "
+                f"not found in 'encryption_keys' section."
+            )
+            sys.exit(1)
+
+    if not passphrase:
+        print(
+            f"[ERROR] Job '{job_label}': encryption is enabled but no passphrase "
+            f"is provided. Set 'passphrase' directly or reference a 'key_name'."
+        )
+        sys.exit(1)
+
+    enc["passphrase"] = passphrase
+    enc["enabled"] = True
+
+
+def _normalise_smtp(config):
+    """
+    Validate the optional ``smtp`` section.
+
+    If present, the section must contain at least ``host``.  Sensible
+    defaults are applied for other fields.
+    """
+    smtp = config.get("smtp")
+    if smtp is None or not isinstance(smtp, dict):
+        return
+
+    if not smtp.get("host"):
+        print("[ERROR] SMTP configuration requires 'host'.")
+        sys.exit(1)
+
+    smtp.setdefault("port", 587)
+    smtp.setdefault("username", "")
+    smtp.setdefault("password", "")
+    smtp.setdefault("use_tls", True)
+    smtp.setdefault("from_address", smtp.get("username", "bck-manager@localhost"))
+
+
+def _normalise_notifications(config):
+    """
+    Validate the optional ``notifications`` section and per-job
+    notification overrides.
+
+    Global structure::
+
+        notifications:
+          enabled: true
+          recipients:
+            - admin@example.com
+
+    Per-job structure (inside each ``backup_jobs`` entry)::
+
+        notifications:
+          additional_recipients:
+            - extra@example.com
+          # OR
+          exclusive_recipients:
+            - only@example.com
+    """
+    notif = config.get("notifications")
+    if notif is None or not isinstance(notif, dict):
+        config["notifications"] = {"enabled": False, "recipients": []}
+        return
+
+    notif.setdefault("enabled", False)
+    notif.setdefault("recipients", [])
+
+    if not isinstance(notif["recipients"], list):
+        print("[ERROR] notifications.recipients must be a list.")
+        sys.exit(1)
+
+    # Per-job notification config
+    for job in config.get("backup_jobs", []):
+        job_notif = job.get("notifications")
+        if job_notif is None or not isinstance(job_notif, dict):
+            job["notifications"] = {}
+            continue
+
+        job_label = job.get("name", "?")
+
+        additional = job_notif.get("additional_recipients", [])
+        exclusive = job_notif.get("exclusive_recipients", [])
+
+        if not isinstance(additional, list):
+            print(
+                f"[ERROR] Job '{job_label}': "
+                f"notifications.additional_recipients must be a list."
+            )
+            sys.exit(1)
+
+        if not isinstance(exclusive, list):
+            print(
+                f"[ERROR] Job '{job_label}': "
+                f"notifications.exclusive_recipients must be a list."
+            )
+            sys.exit(1)
+
+        if additional and exclusive:
+            print(
+                f"[ERROR] Job '{job_label}': cannot set both "
+                f"'additional_recipients' and 'exclusive_recipients'."
+            )
+            sys.exit(1)
+
+        job_notif.setdefault("additional_recipients", [])
+        job_notif.setdefault("exclusive_recipients", [])
 
 
 def get_endpoint_config(config, endpoint_name):

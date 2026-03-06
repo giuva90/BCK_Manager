@@ -28,6 +28,7 @@ from config_loader import load_config, get_endpoint_config, get_enabled_jobs
 from app_logger import setup_logger
 from backup import run_backup_job, run_all_jobs
 from retention import apply_retention
+from notifier import send_backup_report
 from restore import (
     list_remote_backups,
     restore_file,
@@ -163,7 +164,7 @@ def action_run_all_backups(config, logger):
         return
 
     print()
-    total, ok, fail = run_all_jobs(config, logger)
+    total, ok, fail, _results = run_all_jobs(config, logger)
     print()
     print_separator()
     print(f"  Result: {ok}/{total} succeeded, {fail} failed.")
@@ -204,7 +205,7 @@ def action_run_single_job(config, logger):
     result = run_backup_job(job, config, logger)
     print()
     print_separator()
-    if result:
+    if result["success"]:
         print(f"  ✓ Backup '{job['name']}' completed successfully.")
     else:
         print(f"  ✗ Backup '{job['name']}' failed. Check the logs.")
@@ -252,6 +253,25 @@ def action_show_jobs(config, logger):
                 f"{ret.get('daily_keep', 0)} daily + "
                 f"{ret.get('monthly_keep', 0)} monthly"
             )
+
+        # Encryption info
+        enc = job.get('encryption', {})
+        if enc.get('enabled'):
+            key_source = enc.get('key_name', 'inline passphrase')
+            print(f"     Encryption    : {enc.get('algorithm', 'AES-256-GCM')} (key: {key_source})")
+        else:
+            print(f"     Encryption    : disabled")
+
+        # Notification info
+        job_notif = job.get('notifications', {})
+        additional = job_notif.get('additional_recipients', [])
+        exclusive = job_notif.get('exclusive_recipients', [])
+        if exclusive:
+            print(f"     Notifications : exclusive → {', '.join(exclusive)}")
+        elif additional:
+            print(f"     Notifications : default + {', '.join(additional)}")
+        else:
+            print(f"     Notifications : default recipients")
 
         # Check if source path / volume exists
         if job["mode"] == "volume":
@@ -662,9 +682,33 @@ def action_show_config(config, logger):
         print(f"    • {ep['name']}: {ep['endpoint_url']} (region: {ep['region']})")
     print()
 
+    # Encryption keys summary
+    enc_keys = config.get("encryption_keys", [])
+    if enc_keys:
+        print(f"  Encryption keys: {len(enc_keys)} defined")
+        for ek in enc_keys:
+            print(f"    • {ek['name']}")
+    else:
+        print(f"  Encryption keys: none defined")
+    print()
+
+    # Email notifications summary
+    smtp = config.get("smtp")
+    notif = config.get("notifications", {})
+    if smtp and notif.get("enabled"):
+        recipients = notif.get("recipients", [])
+        print(f"  Email alerts  : enabled via {smtp.get('host', '?')}:{smtp.get('port', '?')}")
+        print(f"  Recipients    : {len(recipients)} default")
+        for r in recipients:
+            print(f"    • {r}")
+    else:
+        print(f"  Email alerts  : disabled")
+    print()
+
     jobs = config.get("backup_jobs", [])
     enabled = len([j for j in jobs if j.get("enabled", True)])
-    print(f"  Backup jobs: {len(jobs)} total, {enabled} enabled")
+    encrypted = len([j for j in jobs if j.get("encryption", {}).get("enabled")])
+    print(f"  Backup jobs: {len(jobs)} total, {enabled} enabled, {encrypted} encrypted")
     print()
 
     press_enter()
@@ -722,13 +766,20 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sudo python3 bck_manager.py                         # Interactive mode
-  sudo python3 bck_manager.py --run-all                # Run all backup jobs
-  sudo python3 bck_manager.py --run-job app-data       # Run a specific job
-  sudo python3 bck_manager.py --apply-retention        # Apply retention policies
-  sudo python3 bck_manager.py --apply-retention --dry  # Preview retention (no delete)
-  sudo python3 bck_manager.py --restore-volume <job>   # Restore a Docker volume (interactive)
-  sudo python3 bck_manager.py --list-jobs              # List configured jobs
+  sudo python3 bck_manager.py                               # Interactive mode
+  sudo python3 bck_manager.py --run-all                     # Run all backup jobs
+  sudo python3 bck_manager.py --run-job app-data            # Run a specific job
+  sudo python3 bck_manager.py --apply-retention             # Apply retention policies
+  sudo python3 bck_manager.py --apply-retention --dry       # Preview retention (no delete)
+  sudo python3 bck_manager.py --restore-volume <job>        # Restore a Docker volume (interactive)
+  sudo python3 bck_manager.py --list-jobs                   # List configured jobs
+
+  # --debug can be combined with ANY command above for verbose output:
+  sudo python3 bck_manager.py --run-all --debug
+  sudo python3 bck_manager.py --run-job app-data --debug
+  sudo python3 bck_manager.py --apply-retention --debug
+  sudo python3 bck_manager.py --restore-volume <job> --debug
+  sudo python3 bck_manager.py --list-jobs --debug
         """,
     )
     parser.add_argument(
@@ -775,6 +826,15 @@ Examples:
         action="version",
         version=f"{APP_NAME} v{APP_VERSION}",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Enable verbose DEBUG output on the console. "
+            "Can be combined with any command. "
+            "Includes full SMTP session log and raw email content."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -788,7 +848,7 @@ def main():
 
     # Setup logging
     log_file = config.get("settings", {}).get("log_file", "/var/log/bck_manager.log")
-    logger = setup_logger(log_file)
+    logger = setup_logger(log_file, debug=args.debug)
 
     # ── Non-interactive: --list-jobs ──
     if args.list_jobs:
@@ -798,18 +858,21 @@ def main():
             sys.exit(0)
         for job in jobs:
             status = "ON " if job.get("enabled", True) else "OFF"
+            enc_flag = "🔒" if job.get("encryption", {}).get("enabled") else "  "
             if job["mode"] == "volume":
                 source = f"vol:{job.get('volume_name', '?')}"
             else:
                 source = job.get("source_path", "?")
-            print(f"  [{status}] {job['name']:<25} {source:<30} "
+            print(f"  [{status}] {enc_flag} {job['name']:<25} {source:<30} "
                   f"-> s3://{job['bucket']}/{job.get('prefix', '')}  ({job['mode']})")
         sys.exit(0)
 
     # ── Non-interactive: --run-all ──
     if args.run_all:
         logger.info("Non-interactive mode: --run-all")
-        total, ok, fail = run_all_jobs(config, logger)
+        total, ok, fail, results = run_all_jobs(config, logger)
+        # Send email notification (non-interactive only)
+        send_backup_report(results, config, logger)
         if fail > 0:
             sys.exit(1)
         sys.exit(0)
@@ -827,7 +890,9 @@ def main():
             print(f"Error: Job '{args.run_job}' not found.")
             sys.exit(1)
         result = run_backup_job(job, config, logger)
-        sys.exit(0 if result else 1)
+        # Send email notification (non-interactive only)
+        send_backup_report([result], config, logger)
+        sys.exit(0 if result["success"] else 1)
 
     # ── Non-interactive: --apply-retention ──
     if args.apply_retention:
