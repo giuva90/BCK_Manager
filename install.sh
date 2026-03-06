@@ -64,6 +64,7 @@ cp "${SCRIPT_DIR}/docker_utils.py" "${APP_DIR}/"
 cp "${SCRIPT_DIR}/app_logger.py" "${APP_DIR}/"
 cp "${SCRIPT_DIR}/utils.py" "${APP_DIR}/"
 cp "${SCRIPT_DIR}/encryption.py" "${APP_DIR}/"
+cp "${SCRIPT_DIR}/notifier.py" "${APP_DIR}/"
 cp "${SCRIPT_DIR}/requirements.txt" "${APP_DIR}/"
 echo "       ✓ Application files updated."
 

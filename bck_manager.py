@@ -28,6 +28,7 @@ from config_loader import load_config, get_endpoint_config, get_enabled_jobs
 from app_logger import setup_logger
 from backup import run_backup_job, run_all_jobs
 from retention import apply_retention
+from notifier import send_backup_report
 from restore import (
     list_remote_backups,
     restore_file,
@@ -163,7 +164,7 @@ def action_run_all_backups(config, logger):
         return
 
     print()
-    total, ok, fail = run_all_jobs(config, logger)
+    total, ok, fail, _results = run_all_jobs(config, logger)
     print()
     print_separator()
     print(f"  Result: {ok}/{total} succeeded, {fail} failed.")
@@ -204,7 +205,7 @@ def action_run_single_job(config, logger):
     result = run_backup_job(job, config, logger)
     print()
     print_separator()
-    if result:
+    if result["success"]:
         print(f"  ✓ Backup '{job['name']}' completed successfully.")
     else:
         print(f"  ✗ Backup '{job['name']}' failed. Check the logs.")
@@ -829,7 +830,9 @@ def main():
     # ── Non-interactive: --run-all ──
     if args.run_all:
         logger.info("Non-interactive mode: --run-all")
-        total, ok, fail = run_all_jobs(config, logger)
+        total, ok, fail, results = run_all_jobs(config, logger)
+        # Send email notification (non-interactive only)
+        send_backup_report(results, config, logger)
         if fail > 0:
             sys.exit(1)
         sys.exit(0)
@@ -847,7 +850,9 @@ def main():
             print(f"Error: Job '{args.run_job}' not found.")
             sys.exit(1)
         result = run_backup_job(job, config, logger)
-        sys.exit(0 if result else 1)
+        # Send email notification (non-interactive only)
+        send_backup_report([result], config, logger)
+        sys.exit(0 if result["success"] else 1)
 
     # ── Non-interactive: --apply-retention ──
     if args.apply_retention:

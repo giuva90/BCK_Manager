@@ -45,7 +45,20 @@ def run_backup_job(job, config, logger):
         logger: Logger instance.
 
     Returns:
-        True if successful, False otherwise.
+        A result dict with the following keys:
+
+        - ``job_name`` (str): Name of the job.
+        - ``bucket`` (str): S3 bucket name.
+        - ``prefix`` (str): S3 key prefix.
+        - ``success`` (bool): Whether the job succeeded.
+        - ``uploaded_files`` (list[dict]): Files uploaded
+          (each has ``s3_key``, ``size``, ``encrypted``).
+        - ``error`` (str|None): Error description if the job failed.
+        - ``encrypted`` (bool): Whether encryption was enabled.
+        - ``algorithm`` (str): Encryption algorithm if encrypted.
+        - ``bucket_total_size`` (int): Total bytes under the bucket/prefix
+          (-1 if unknown).
+        - ``notifications`` (dict): Notification routing config for this job.
     """
     job_name = job["name"]
     source_path = job.get("source_path", "")
@@ -62,6 +75,26 @@ def run_backup_job(job, config, logger):
     # Resolve encryption configuration
     enc_config = get_encryption_config(job, config)
     encryption_enabled = enc_config.get("enabled", False)
+
+    # Shorthand to build the result dict at any exit point
+    uploaded_files = []
+    errors = []
+
+    def _make_result(success, bucket_total_size=-1):
+        return {
+            "job_name": job_name,
+            "bucket": bucket,
+            "prefix": prefix,
+            "success": success,
+            "uploaded_files": uploaded_files,
+            "error": "; ".join(errors) if errors else None,
+            "encrypted": encryption_enabled,
+            "algorithm": (
+                enc_config.get("algorithm", "") if encryption_enabled else ""
+            ),
+            "bucket_total_size": bucket_total_size,
+            "notifications": job.get("notifications", {}),
+        }
 
     logger.info("=" * 50)
     logger.info(f"BACKUP JOB: {job_name}")
@@ -85,20 +118,24 @@ def run_backup_job(job, config, logger):
     if mode == "volume":
         if not docker_available(logger):
             logger.error("Docker is not available.")
-            return False
+            errors.append("Docker is not available")
+            return _make_result(False)
         if not volume_exists(volume_name, logger):
             logger.error(f"Docker volume not found: {volume_name}")
-            return False
+            errors.append(f"Docker volume not found: {volume_name}")
+            return _make_result(False)
     else:
         if not os.path.exists(source_path):
             logger.error(f"Source path not found: {source_path}")
-            return False
+            errors.append(f"Source path not found: {source_path}")
+            return _make_result(False)
 
     # Initialize S3 client
     ep_config = get_endpoint_config(config, job["s3_endpoint"])
     if not ep_config:
         logger.error(f"S3 endpoint '{job['s3_endpoint']}' not found.")
-        return False
+        errors.append(f"S3 endpoint '{job['s3_endpoint']}' not found")
+        return _make_result(False)
 
     try:
         s3 = S3Client(
@@ -110,7 +147,8 @@ def run_backup_job(job, config, logger):
         )
     except Exception as e:
         logger.error(f"Unable to connect to S3 endpoint: {e}")
-        return False
+        errors.append(f"Unable to connect to S3 endpoint: {e}")
+        return _make_result(False)
 
     # --- STEP 1: pre_command → local backup ---
     # When encryption is enabled the flow is split in two steps so that
@@ -124,7 +162,8 @@ def run_backup_job(job, config, logger):
             # post_command must still run (always, even on failure)
             if post_command:
                 _run_hook("post_command", post_command, job_name, logger)
-            return False
+            errors.append(f"pre_command failed: {pre_command}")
+            return _make_result(False)
 
     # Create temp directory for this job
     job_temp_dir = os.path.join(temp_dir, job_name)
@@ -146,13 +185,16 @@ def run_backup_job(job, config, logger):
                 _run_hook("post_command", post_command, job_name, logger)
                 post_command_done = True
 
-            success = _encrypt_and_upload(
+            upload_info = _encrypt_and_upload(
                 s3, archive_path, bucket, prefix, logger, enc_config
             )
-            if success:
+            if upload_info:
+                uploaded_files.append(upload_info)
                 uploaded_count = 1
             else:
                 failed_count = 1
+                success = False
+                errors.append(f"Failed to encrypt/upload volume archive")
 
         elif mode == "folder":
             archive_path = compress_folder(
@@ -164,22 +206,27 @@ def run_backup_job(job, config, logger):
                 _run_hook("post_command", post_command, job_name, logger)
                 post_command_done = True
 
-            success = _encrypt_and_upload(
+            upload_info = _encrypt_and_upload(
                 s3, archive_path, bucket, prefix, logger, enc_config
             )
-            if success:
+            if upload_info:
+                uploaded_files.append(upload_info)
                 uploaded_count = 1
             else:
                 failed_count = 1
+                success = False
+                errors.append(f"Failed to encrypt/upload folder archive")
 
         elif mode == "files":
             # Compress each file individually
             if not os.path.isdir(source_path):
-                logger.error(
+                msg = (
                     f"Mode 'files' requires a directory, "
                     f"but {source_path} is not a directory."
                 )
-                return False
+                logger.error(msg)
+                errors.append(msg)
+                return _make_result(False)
 
             files = [
                 f
@@ -189,7 +236,7 @@ def run_backup_job(job, config, logger):
 
             if not files:
                 logger.warning(f"No files found in {source_path}")
-                return True
+                return _make_result(True)
 
             logger.info(f"Found {len(files)} file(s) to back up individually.")
 
@@ -213,6 +260,7 @@ def run_backup_job(job, config, logger):
                     archives_to_upload.append(archive_path)
                 except Exception as e:
                     logger.error(f"Error compressing {file_path}: {e}")
+                    errors.append(f"Compression failed for {filename}: {e}")
                     failed_count += 1
                     success = False
 
@@ -223,20 +271,25 @@ def run_backup_job(job, config, logger):
 
             # Encrypt and upload each archive
             for archive_path in archives_to_upload:
-                result = _encrypt_and_upload(
+                upload_info = _encrypt_and_upload(
                     s3, archive_path, bucket, prefix, logger, enc_config
                 )
-                if result:
+                if upload_info:
+                    uploaded_files.append(upload_info)
                     uploaded_count += 1
                 else:
                     failed_count += 1
                     success = False
+                    errors.append(
+                        f"Failed to upload {os.path.basename(archive_path)}"
+                    )
 
             if skipped_count:
                 logger.info(f"{skipped_count} file(s) skipped (already on S3).")
 
     except Exception as e:
         logger.error(f"Error in backup job '{job_name}': {e}")
+        errors.append(str(e))
         success = False
         failed_count += 1
 
@@ -263,7 +316,10 @@ def run_backup_job(job, config, logger):
         except Exception as e:
             logger.error(f"Retention error for '{job_name}': {e}")
 
-    return success
+    # --- Compute bucket/prefix total size for reporting ---
+    bucket_total_size = _get_bucket_prefix_size(s3, bucket, prefix, logger)
+
+    return _make_result(success, bucket_total_size)
 
 
 def _run_hook(hook_name, command, job_name, logger):
@@ -374,12 +430,14 @@ def _encrypt_and_upload(s3, archive_path, bucket, prefix, logger,
         enc_config: Encryption configuration dict (or None).
 
     Returns:
-        True if successful, False otherwise.
+        A dict ``{"s3_key": ..., "size": ..., "encrypted": bool}`` on
+        success, or ``None`` on failure.
     """
     if archive_path is None:
-        return False
+        return None
 
     current_path = archive_path
+    was_encrypted = False
     try:
         # --- Encrypt if enabled ---
         if enc_config and enc_config.get("enabled"):
@@ -390,18 +448,21 @@ def _encrypt_and_upload(s3, archive_path, bucket, prefix, logger,
                 logger,
                 algorithm=enc_config.get("algorithm", "AES-256-GCM"),
             )
+            was_encrypted = True
 
         archive_name = os.path.basename(current_path)
 
         # Build S3 key
         s3_key = f"{prefix}/{archive_name}" if prefix else archive_name
 
+        file_size = os.path.getsize(current_path)
         s3.upload_file(current_path, bucket, s3_key)
-        return True
+
+        return {"s3_key": s3_key, "size": file_size, "encrypted": was_encrypted}
 
     except Exception as e:
         logger.error(f"Error during encrypt/upload of {archive_path}: {e}")
-        return False
+        return None
     finally:
         if current_path and os.path.exists(current_path):
             cleanup_temp(current_path, logger)
@@ -411,35 +472,66 @@ def _encrypt_and_upload(s3, archive_path, bucket, prefix, logger,
             cleanup_temp(archive_path, logger)
 
 
+def _get_bucket_prefix_size(s3, bucket, prefix, logger):
+    """
+    Return the total size in bytes of all objects under *bucket*/*prefix*.
+
+    Returns -1 if the listing fails.
+    """
+    try:
+        objects = s3.list_objects(bucket, prefix=prefix, max_keys=0)
+        total = sum(obj.get("Size", 0) for obj in objects)
+        return total
+    except Exception as e:
+        logger.warning(f"Could not determine bucket/prefix total size: {e}")
+        return -1
+
+
 def run_all_jobs(config, logger):
     """
     Run all enabled backup jobs.
 
     Returns:
-        Tuple (total_jobs, successful, failed).
+        Tuple (total_jobs, successful, failed, results) where *results*
+        is a list of result dicts (one per job).
     """
     jobs = [j for j in config.get("backup_jobs", []) if j.get("enabled", True)]
 
     if not jobs:
         logger.warning("No enabled backup jobs found.")
-        return 0, 0, 0
+        return 0, 0, 0, []
 
     logger.info(f"Starting {len(jobs)} backup job(s)...")
 
     successful = 0
     failed = 0
+    results = []
 
     for job in jobs:
         try:
-            if run_backup_job(job, config, logger):
+            result = run_backup_job(job, config, logger)
+            results.append(result)
+            if result["success"]:
                 successful += 1
             else:
                 failed += 1
         except Exception as e:
             logger.error(f"Critical error in job '{job['name']}': {e}")
             failed += 1
+            results.append({
+                "job_name": job.get("name", "?"),
+                "bucket": job.get("bucket", "?"),
+                "prefix": job.get("prefix", ""),
+                "success": False,
+                "uploaded_files": [],
+                "error": str(e),
+                "encrypted": False,
+                "algorithm": "",
+                "bucket_total_size": -1,
+                "notifications": job.get("notifications", {}),
+            })
 
     logger.info(
         f"All backups done: {successful}/{len(jobs)} succeeded, {failed} failed."
     )
-    return len(jobs), successful, failed
+    return len(jobs), successful, failed, results

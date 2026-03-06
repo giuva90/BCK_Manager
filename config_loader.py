@@ -146,6 +146,12 @@ def _validate_config(config):
         )
         sys.exit(1)
 
+    # SMTP defaults (optional section)
+    _normalise_smtp(config)
+
+    # Notifications defaults (optional section)
+    _normalise_notifications(config)
+
 
 def _normalise_retention(job, index):
     """
@@ -283,6 +289,98 @@ def _normalise_encryption(job, index, config):
 
     enc["passphrase"] = passphrase
     enc["enabled"] = True
+
+
+def _normalise_smtp(config):
+    """
+    Validate the optional ``smtp`` section.
+
+    If present, the section must contain at least ``host``.  Sensible
+    defaults are applied for other fields.
+    """
+    smtp = config.get("smtp")
+    if smtp is None or not isinstance(smtp, dict):
+        return
+
+    if not smtp.get("host"):
+        print("[ERROR] SMTP configuration requires 'host'.")
+        sys.exit(1)
+
+    smtp.setdefault("port", 587)
+    smtp.setdefault("username", "")
+    smtp.setdefault("password", "")
+    smtp.setdefault("use_tls", True)
+    smtp.setdefault("from_address", smtp.get("username", "bck-manager@localhost"))
+
+
+def _normalise_notifications(config):
+    """
+    Validate the optional ``notifications`` section and per-job
+    notification overrides.
+
+    Global structure::
+
+        notifications:
+          enabled: true
+          recipients:
+            - admin@example.com
+
+    Per-job structure (inside each ``backup_jobs`` entry)::
+
+        notifications:
+          additional_recipients:
+            - extra@example.com
+          # OR
+          exclusive_recipients:
+            - only@example.com
+    """
+    notif = config.get("notifications")
+    if notif is None or not isinstance(notif, dict):
+        config["notifications"] = {"enabled": False, "recipients": []}
+        return
+
+    notif.setdefault("enabled", False)
+    notif.setdefault("recipients", [])
+
+    if not isinstance(notif["recipients"], list):
+        print("[ERROR] notifications.recipients must be a list.")
+        sys.exit(1)
+
+    # Per-job notification config
+    for job in config.get("backup_jobs", []):
+        job_notif = job.get("notifications")
+        if job_notif is None or not isinstance(job_notif, dict):
+            job["notifications"] = {}
+            continue
+
+        job_label = job.get("name", "?")
+
+        additional = job_notif.get("additional_recipients", [])
+        exclusive = job_notif.get("exclusive_recipients", [])
+
+        if not isinstance(additional, list):
+            print(
+                f"[ERROR] Job '{job_label}': "
+                f"notifications.additional_recipients must be a list."
+            )
+            sys.exit(1)
+
+        if not isinstance(exclusive, list):
+            print(
+                f"[ERROR] Job '{job_label}': "
+                f"notifications.exclusive_recipients must be a list."
+            )
+            sys.exit(1)
+
+        if additional and exclusive:
+            print(
+                f"[ERROR] Job '{job_label}': cannot set both "
+                f"'additional_recipients' and 'exclusive_recipients'."
+            )
+            sys.exit(1)
+
+        job_notif.setdefault("additional_recipients", [])
+        job_notif.setdefault("exclusive_recipients", [])
 
 
 def get_endpoint_config(config, endpoint_name):

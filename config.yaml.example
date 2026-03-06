@@ -107,6 +107,10 @@ backup_jobs:
       enabled: true
       algorithm: "AES-256-GCM"
       key_name: "production-key"
+    # Per-job notification: additional recipients (added to the default list)
+    notifications:
+      additional_recipients:
+        - "dba@example.com"
     enabled: true
 
   - name: "docker-compose-configs"
@@ -138,6 +142,11 @@ backup_jobs:
       enabled: true
       algorithm: "AES-256-GCM"
       passphrase: "my-postgres-backup-secret"
+    # Per-job notification: exclusive recipients (replace default list;
+    # default recipients will NOT see this job in their report)
+    notifications:
+      exclusive_recipients:
+        - "dba-team@example.com"
     enabled: true
 
 # --- General Settings ---
@@ -153,3 +162,31 @@ settings:
 
   # Maximum concurrent uploads
   max_concurrent_uploads: 1
+
+# --- SMTP Configuration (optional) ---
+# Configure an SMTP server to receive email reports after non-interactive
+# backup runs (--run-all / --run-job).  Emails are never sent in
+# interactive mode.
+#
+# If this section is absent or commented out, email notifications are
+# disabled.
+
+smtp:
+  host: "smtp.example.com"
+  port: 587
+  username: "alerts@example.com"
+  password: "YOUR_SMTP_PASSWORD"
+  use_tls: true
+  from_address: "BCK Manager <alerts@example.com>"
+
+# --- Email Notifications (optional) ---
+# Global on/off switch and default recipient list.
+# Every enabled job's results are sent to these recipients, unless the
+# job defines exclusive_recipients (in which case default recipients do
+# NOT receive that job's results).
+
+notifications:
+  enabled: true
+  recipients:
+    - "admin@example.com"
+    - "ops-team@example.com"
