@@ -42,6 +42,7 @@ PBKDF2_ITERATIONS = 600_000
 SALT_LENGTH = 32        # 256-bit salt
 NONCE_LENGTH = 12       # 96-bit nonce (recommended for AES-GCM)
 KEY_LENGTH = 32         # 256-bit key for AES-256
+TAG_LENGTH = 16         # 128-bit GCM authentication tag
 
 # Read/write in 64 KiB chunks when streaming – but AES-GCM works on the
 # full plaintext at once (no streaming mode in the AEAD API), so we read
@@ -149,9 +150,8 @@ def encrypt_file(source_path, passphrase, logger, algorithm="AES-256-GCM"):
         ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext, None)
 
         # AES-GCM appends the 16-byte tag to the ciphertext
-        tag_length = 16
-        ciphertext = ciphertext_with_tag[:-tag_length]
-        tag = ciphertext_with_tag[-tag_length:]
+        ciphertext = ciphertext_with_tag[:-TAG_LENGTH]
+        tag = ciphertext_with_tag[-TAG_LENGTH:]
 
         # Write encrypted file with header
         with open(encrypted_path, "wb") as f:

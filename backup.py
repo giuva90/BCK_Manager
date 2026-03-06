@@ -405,7 +405,8 @@ def _encrypt_and_upload(s3, archive_path, bucket, prefix, logger,
     finally:
         if current_path and os.path.exists(current_path):
             cleanup_temp(current_path, logger)
-        # Also clean up original if it still exists (encryption failed mid-way)
+        # Clean up the original unencrypted file if encryption produced
+        # a new .enc file (current_path differs from archive_path).
         if archive_path != current_path and os.path.exists(archive_path):
             cleanup_temp(archive_path, logger)
 
