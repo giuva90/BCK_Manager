@@ -8,9 +8,11 @@ Manages compressed backups to any S3-compatible object storage (OVH, AWS S3, Min
 - **Folder backup** – compresses an entire directory into a single `.tar.gz` archive
 - **File-by-file backup** – compresses each file individually (ideal for database dump folders)
 - **Docker volume backup** – backs up a named Docker volume directly to S3 (no artifacts left on disk)
+- **Client-side encryption** – AES-256-GCM encryption with per-job keys; data is unreadable without your passphrase
 - **Retention policies** – automatic cleanup with two modes: *simple* (keep N days) or *smart* (N daily + M monthly)
 - **Pre/post command hooks** – optional shell commands run before and after each job (e.g. stop/start containers)
-- **Restore** – downloads and extracts an archive to its original location (file is **not** deleted from S3)
+- **2-step backup flow** – when encryption is enabled, services restart right after the local copy is made, before encryption and upload
+- **Restore** – downloads, decrypts (if needed) and extracts an archive to its original location (file is **not** deleted from S3)
 - **Volume restore** – restore a Docker volume to a new name or replace the original (with container safety checks)
 - **Bucket explorer** – list buckets and browse their contents directly from the terminal
 - **Interactive & CLI modes** – number-based menu or command-line flags for cron/automation
@@ -59,6 +61,10 @@ s3_endpoints:
     secret_key: "YOUR_SECRET_KEY"
     region: "gra"
 
+encryption_keys:
+  - name: "production-key"
+    passphrase: "YOUR_STRONG_PASSPHRASE"
+
 backup_jobs:
   - name: "app-data"
     source_path: "/opt/myapp/data"
@@ -71,8 +77,148 @@ backup_jobs:
     retention:
       mode: "simple"
       days: 30
+    encryption:              # optional: encrypt the archive
+      enabled: true
+      key_name: "production-key"
     enabled: true
 ```
+
+### Encryption
+
+BCK Manager supports **client-side encryption** so that your backup archives are completely
+unreadable to anyone who does not have the passphrase — including S3 storage providers.
+
+The encryption key is **yours**: it is never sent to S3 and is not stored alongside the
+encrypted data. If you lose the passphrase, **your backups are irrecoverable**.
+
+#### How it works
+
+| Step | Description |
+|------|-------------|
+| Key derivation | A 256-bit encryption key is derived from your passphrase using **PBKDF2-HMAC-SHA256** (600 000 iterations) with a unique random salt per file |
+| Encryption | Data is encrypted with **AES-256-GCM** (authenticated encryption) |
+| Integrity | The GCM authentication tag guarantees that the ciphertext has not been tampered with |
+| File format | `BCKENC01` magic header + salt + nonce + auth tag + ciphertext (all in one `.enc` file) |
+
+Encrypted files have the `.enc` extension appended (e.g. `archive_20260115_020000.tar.gz.enc`).
+
+#### Configuration
+
+Encryption is configured **per job**. Each job can use:
+
+- An **inline passphrase** — unique to that job
+- A **named key** — defined once in the global `encryption_keys` section and shared across jobs
+
+##### Option 1: Named key (recommended for multiple jobs)
+
+Define the key once at the top level and reference it in each job:
+
+```yaml
+encryption_keys:
+  - name: "production-key"
+    passphrase: "my-very-strong-passphrase-here"
+
+backup_jobs:
+  - name: "db-dumps"
+    # ...
+    encryption:
+      enabled: true
+      algorithm: "AES-256-GCM"
+      key_name: "production-key"      # references the key above
+```
+
+##### Option 2: Inline passphrase (unique per job)
+
+```yaml
+backup_jobs:
+  - name: "postgres-volume"
+    # ...
+    encryption:
+      enabled: true
+      algorithm: "AES-256-GCM"
+      passphrase: "unique-passphrase-for-this-job"
+```
+
+##### Option 3: No encryption
+
+Simply omit the `encryption` block or set `enabled: false`:
+
+```yaml
+backup_jobs:
+  - name: "public-assets"
+    # ...
+    # no encryption block → backups stored as plain archives
+```
+
+#### Separate keys per job
+
+You can define **multiple named keys** for different security levels and assign them
+to different jobs:
+
+```yaml
+encryption_keys:
+  - name: "high-security"
+    passphrase: "ultra-long-passphrase-for-PII-data"
+  - name: "standard"
+    passphrase: "standard-passphrase-for-configs"
+
+backup_jobs:
+  - name: "customer-database"
+    encryption:
+      enabled: true
+      key_name: "high-security"
+
+  - name: "app-configs"
+    encryption:
+      enabled: true
+      key_name: "standard"
+
+  - name: "public-logs"
+    # no encryption
+```
+
+#### Supported algorithms
+
+| Algorithm | Key size | Description |
+|-----------|----------|-------------|
+| `AES-256-GCM` | 256-bit | Authenticated encryption (default, recommended) |
+
+The algorithm field defaults to `AES-256-GCM` if omitted.
+
+#### Passphrase management
+
+> **⚠ CRITICAL**: Your passphrase is the **only** way to recover encrypted backups.  
+> Store it securely in a password manager, a secrets vault, or a physically secure location.
+
+- The passphrase is used to derive the encryption key via PBKDF2 (it is **never** stored
+  in the encrypted file)
+- Each encrypted file uses a unique random salt, so identical files encrypted with the
+  same passphrase produce different ciphertext
+- **Changing the passphrase** for future backups is fine — older archives remain decryptable
+  with the passphrase they were encrypted with
+- The passphrase lives in `config.yaml`, which is `.gitignore`'d to prevent accidental commits
+
+### 2-step backup flow (with encryption)
+
+When encryption is enabled on a job that also has `pre_command` / `post_command` hooks,
+the backup follows a **2-step flow** that minimises service downtime:
+
+```
+Step 1 (data capture):
+  pre_command  →  create local archive  →  post_command
+  (services restart immediately after the local copy is made)
+
+Step 2 (encrypt & upload):
+  encrypt archive  →  upload to S3  →  cleanup temp files
+  (time-consuming operations happen while services are already running)
+```
+
+Without encryption, the original single-step flow is preserved:
+`pre_command → compress → upload → post_command`.
+
+This design is particularly useful for database volumes where the service
+(e.g. PostgreSQL) is stopped for the backup and should be restarted as soon as
+possible.
 
 ### Retention policies
 
@@ -147,14 +293,18 @@ normally — no silent data loss.
     mode: "smart"
     daily_keep: 7
     monthly_keep: 6
+  encryption:
+    enabled: true
+    key_name: "production-key"
   enabled: true
 ```
 
 The backup process:
 1. Spins up a temporary `alpine` container that mounts the volume read-only.
 2. Creates a compressed tar archive of the volume contents.
-3. Uploads the archive to S3.
-4. Removes the temporary container and local archive — **nothing is left on disk**.
+3. Encrypts the archive (if encryption is enabled).
+4. Uploads the archive to S3.
+5. Removes the temporary container and local archive — **nothing is left on disk**.
 
 #### Volume restore
 
@@ -170,6 +320,9 @@ The restore flow asks you to choose between two modes:
 |------|-------------|
 | **New volume** | Creates a new volume with a name of your choice (suggested: `<original>_restore`). The original volume is untouched. |
 | **Replace** | Deletes the existing volume and recreates it with the same name. Before proceeding, the tool lists all containers that use the volume and **verifies they are stopped**. If any are still running, the operation is blocked. |
+
+If the archive is encrypted, it is automatically decrypted using the passphrase
+configured for the job before extraction.
 
 ### Pre/post command hooks
 
@@ -187,6 +340,9 @@ post_command: "docker start myapp_db"
 
 Both fields are optional and default to an empty string (no command).
 Commands are executed via the system shell with a **10-minute timeout**.
+
+> **Note**: When encryption is enabled, `post_command` runs right after the local
+> archive is created (before encryption and upload). See [2-step backup flow](#2-step-backup-flow-with-encryption).
 
 ## Usage
 
@@ -212,7 +368,7 @@ sudo bck-manager --apply-retention
 # Restore a Docker volume (interactive)
 sudo bck-manager --restore-volume postgres-volume
 
-# List configured jobs
+# List configured jobs (🔒 = encrypted)
 sudo bck-manager --list-jobs
 
 # Use a different config file
@@ -235,9 +391,10 @@ BCK_Manager/
 ├── bck_manager.py      # Main entry point and interactive menu
 ├── config_loader.py    # Configuration loading and validation
 ├── s3_client.py        # S3 client (boto3 wrapper)
-├── backup.py           # Backup logic (compression + upload)
+├── backup.py           # Backup logic (compression + encryption + upload)
+├── encryption.py       # Client-side encryption (AES-256-GCM)
 ├── retention.py        # Retention policy engine (simple & smart)
-├── restore.py          # Restore logic (download + extraction)
+├── restore.py          # Restore logic (download + decryption + extraction)
 ├── docker_utils.py     # Docker volume backup & restore helpers
 ├── utils.py            # Compression helpers and utilities
 ├── app_logger.py       # Logging setup
@@ -261,8 +418,15 @@ tail -f /var/log/bck_manager.log
 
 ## Security notes
 
-- `config.yaml` is listed in `.gitignore` to prevent accidentally committing credentials.  
-  Use `config.yaml.example` as the committed reference template.
+- **Client-side encryption** — archives are encrypted **before** upload using AES-256-GCM.
+  The encryption key is derived from your passphrase and never leaves your server.
+  S3 providers cannot read your data.
+- **Per-job keys** — each backup job can use a different encryption passphrase, so
+  a compromise of one key does not expose all backups.
+- **Authenticated encryption** — AES-GCM guarantees both confidentiality and integrity:
+  any tampering with the ciphertext is detected during decryption.
+- `config.yaml` is listed in `.gitignore` to prevent accidentally committing credentials
+  and encryption passphrases. Use `config.yaml.example` as the committed reference template.
 - The tool requires root to access all server paths. Run it only on trusted machines.
 - Archive extraction includes a path traversal check to prevent malicious archives.
 
