@@ -9,6 +9,7 @@ Manages compressed backups to any S3-compatible object storage (OVH, AWS S3, Min
 - **File-by-file backup** – compresses each file individually (ideal for database dump folders)
 - **Docker volume backup** – backs up a named Docker volume directly to S3 (no artifacts left on disk)
 - **Client-side encryption** – AES-256-GCM encryption with per-job keys; data is unreadable without your passphrase
+- **Email notifications** – SMTP-based alerting after non-interactive runs, with per-job recipient routing
 - **Retention policies** – automatic cleanup with two modes: *simple* (keep N days) or *smart* (N daily + M monthly)
 - **Pre/post command hooks** – optional shell commands run before and after each job (e.g. stop/start containers)
 - **2-step backup flow** – when encryption is enabled, services restart right after the local copy is made, before encryption and upload
@@ -64,6 +65,19 @@ s3_endpoints:
 encryption_keys:
   - name: "production-key"
     passphrase: "YOUR_STRONG_PASSPHRASE"
+
+smtp:
+  host: "smtp.example.com"
+  port: 587
+  username: "alerts@example.com"
+  password: "YOUR_SMTP_PASSWORD"
+  use_tls: true
+  from_address: "BCK Manager <alerts@example.com>"
+
+notifications:
+  enabled: true
+  recipients:
+    - "admin@example.com"
 
 backup_jobs:
   - name: "app-data"
@@ -219,6 +233,108 @@ Without encryption, the original single-step flow is preserved:
 This design is particularly useful for database volumes where the service
 (e.g. PostgreSQL) is stopped for the backup and should be restarted as soon as
 possible.
+
+### Email notifications
+
+BCK Manager can send **email reports** after non-interactive backup runs
+(`--run-all` / `--run-job`).  Emails are **never** sent in interactive mode.
+
+Each report email contains a repeating block for every job visible to that
+recipient, including:
+
+- Job name and status (✓ OK / ✗ FAILED)
+- Target S3 bucket
+- List of files uploaded with their sizes
+- Whether the file is encrypted
+- Total S3 space used by the job's prefix
+- Error details (if the job failed)
+
+#### SMTP configuration
+
+Define a global SMTP server in `config.yaml`:
+
+```yaml
+smtp:
+  host: "smtp.example.com"
+  port: 587
+  username: "alerts@example.com"
+  password: "YOUR_SMTP_PASSWORD"
+  use_tls: true
+  from_address: "BCK Manager <alerts@example.com>"
+```
+
+If the `smtp` section is absent, email notifications are silently disabled.
+
+#### Default recipients
+
+Define a list of default recipients that receive reports for **all** jobs
+(unless a job overrides with `exclusive_recipients`):
+
+```yaml
+notifications:
+  enabled: true
+  recipients:
+    - "admin@example.com"
+    - "ops-team@example.com"
+```
+
+Set `enabled: false` to globally disable email notifications without
+removing the configuration.
+
+#### Per-job recipient routing
+
+Each backup job can optionally customise who receives its report.
+Two modes are available (they are **mutually exclusive**):
+
+| Mode | Description |
+|------|-------------|
+| `additional_recipients` | These addresses receive the report **in addition** to the default recipients. They see **only** this job in their email. |
+| `exclusive_recipients` | **Only** these addresses receive this job's report. Default recipients do **not** see this job at all. |
+
+##### Additional recipients
+
+The DBA team receives a report that contains only the `db-dumps` job.
+Default recipients (`admin@…`, `ops@…`) also see `db-dumps` alongside
+all other jobs.
+
+```yaml
+backup_jobs:
+  - name: "db-dumps"
+    # ...
+    notifications:
+      additional_recipients:
+        - "dba@example.com"
+```
+
+##### Exclusive recipients
+
+Only `dba-team@example.com` receives the `postgres-volume` job report.
+Default recipients (`admin@…`, `ops@…`) do **not** see it.
+
+```yaml
+backup_jobs:
+  - name: "postgres-volume"
+    # ...
+    notifications:
+      exclusive_recipients:
+        - "dba-team@example.com"
+```
+
+##### No per-job override (default)
+
+If a job has no `notifications` block, it is visible to all default
+recipients.
+
+#### Email content
+
+Each recipient receives **one** email containing only the jobs they
+should see.  The email includes:
+
+- **Header** with server hostname and timestamp
+- **Summary** banner (green = all OK, orange = some failed, red = all
+  failed)
+- **Per-job block** with name, status, bucket, uploaded files + sizes,
+  encryption status, S3 total size, and error details (if any)
 
 ### Retention policies
 
@@ -393,6 +509,7 @@ BCK_Manager/
 ├── s3_client.py        # S3 client (boto3 wrapper)
 ├── backup.py           # Backup logic (compression + encryption + upload)
 ├── encryption.py       # Client-side encryption (AES-256-GCM)
+├── notifier.py         # Email notifications (SMTP + HTML template)
 ├── retention.py        # Retention policy engine (simple & smart)
 ├── restore.py          # Restore logic (download + decryption + extraction)
 ├── docker_utils.py     # Docker volume backup & restore helpers
