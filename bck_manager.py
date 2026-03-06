@@ -262,6 +262,17 @@ def action_show_jobs(config, logger):
         else:
             print(f"     Encryption    : disabled")
 
+        # Notification info
+        job_notif = job.get('notifications', {})
+        additional = job_notif.get('additional_recipients', [])
+        exclusive = job_notif.get('exclusive_recipients', [])
+        if exclusive:
+            print(f"     Notifications : exclusive → {', '.join(exclusive)}")
+        elif additional:
+            print(f"     Notifications : default + {', '.join(additional)}")
+        else:
+            print(f"     Notifications : default recipients")
+
         # Check if source path / volume exists
         if job["mode"] == "volume":
             # Volume existence can only be checked on the Docker host
@@ -679,6 +690,19 @@ def action_show_config(config, logger):
             print(f"    • {ek['name']}")
     else:
         print(f"  Encryption keys: none defined")
+    print()
+
+    # Email notifications summary
+    smtp = config.get("smtp")
+    notif = config.get("notifications", {})
+    if smtp and notif.get("enabled"):
+        recipients = notif.get("recipients", [])
+        print(f"  Email alerts  : enabled via {smtp.get('host', '?')}:{smtp.get('port', '?')}")
+        print(f"  Recipients    : {len(recipients)} default")
+        for r in recipients:
+            print(f"    • {r}")
+    else:
+        print(f"  Email alerts  : disabled")
     print()
 
     jobs = config.get("backup_jobs", [])
