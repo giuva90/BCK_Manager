@@ -253,6 +253,14 @@ def action_show_jobs(config, logger):
                 f"{ret.get('monthly_keep', 0)} monthly"
             )
 
+        # Encryption info
+        enc = job.get('encryption', {})
+        if enc.get('enabled'):
+            key_source = enc.get('key_name', 'inline passphrase')
+            print(f"     Encryption    : {enc.get('algorithm', 'AES-256-GCM')} (key: {key_source})")
+        else:
+            print(f"     Encryption    : disabled")
+
         # Check if source path / volume exists
         if job["mode"] == "volume":
             # Volume existence can only be checked on the Docker host
@@ -662,9 +670,20 @@ def action_show_config(config, logger):
         print(f"    • {ep['name']}: {ep['endpoint_url']} (region: {ep['region']})")
     print()
 
+    # Encryption keys summary
+    enc_keys = config.get("encryption_keys", [])
+    if enc_keys:
+        print(f"  Encryption keys: {len(enc_keys)} defined")
+        for ek in enc_keys:
+            print(f"    • {ek['name']}")
+    else:
+        print(f"  Encryption keys: none defined")
+    print()
+
     jobs = config.get("backup_jobs", [])
     enabled = len([j for j in jobs if j.get("enabled", True)])
-    print(f"  Backup jobs: {len(jobs)} total, {enabled} enabled")
+    encrypted = len([j for j in jobs if j.get("encryption", {}).get("enabled")])
+    print(f"  Backup jobs: {len(jobs)} total, {enabled} enabled, {encrypted} encrypted")
     print()
 
     press_enter()
@@ -798,11 +817,12 @@ def main():
             sys.exit(0)
         for job in jobs:
             status = "ON " if job.get("enabled", True) else "OFF"
+            enc_flag = "🔒" if job.get("encryption", {}).get("enabled") else "  "
             if job["mode"] == "volume":
                 source = f"vol:{job.get('volume_name', '?')}"
             else:
                 source = job.get("source_path", "?")
-            print(f"  [{status}] {job['name']:<25} {source:<30} "
+            print(f"  [{status}] {enc_flag} {job['name']:<25} {source:<30} "
                   f"-> s3://{job['bucket']}/{job.get('prefix', '')}  ({job['mode']})")
         sys.exit(0)
 

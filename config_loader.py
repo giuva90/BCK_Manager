@@ -128,6 +128,9 @@ def _validate_config(config):
         # new "retention" dict format (mode: simple).
         _normalise_retention(job, i)
 
+        # --- Encryption normalisation ---
+        _normalise_encryption(job, i, config)
+
     # Settings defaults
     config.setdefault("settings", {})
     config["settings"].setdefault("temp_dir", "/tmp/bck_manager")
@@ -209,6 +212,77 @@ def _normalise_retention(job, index):
 
     # Nothing specified → disabled
     job["retention"] = {"mode": "none"}
+
+
+def _normalise_encryption(job, index, config):
+    """
+    Normalise the encryption configuration for a single job.
+
+    Accepts these input styles:
+
+    1. **No encryption** – field absent or ``encryption: { enabled: false }``
+       → sets ``encryption: { enabled: false }``.
+
+    2. **Inline passphrase** –
+       ``encryption: { enabled: true, passphrase: "...", algorithm: "AES-256-GCM" }``
+
+    3. **Named key reference** –
+       ``encryption: { enabled: true, key_name: "my-key" }``
+       The key is resolved from the top-level ``encryption_keys`` list.
+
+    Validates algorithm and passphrase availability.
+    """
+    from encryption import SUPPORTED_ALGORITHMS
+
+    job_label = job.get("name", f"#{index + 1}")
+
+    enc = job.get("encryption")
+    if enc is None or not isinstance(enc, dict):
+        job["encryption"] = {"enabled": False}
+        return
+
+    if not enc.get("enabled", False):
+        enc["enabled"] = False
+        return
+
+    # Algorithm validation
+    algorithm = enc.get("algorithm", "AES-256-GCM")
+    if algorithm not in SUPPORTED_ALGORITHMS:
+        print(
+            f"[ERROR] Job '{job_label}': encryption.algorithm must be one of "
+            f"{', '.join(sorted(SUPPORTED_ALGORITHMS))}, got '{algorithm}'."
+        )
+        sys.exit(1)
+    enc["algorithm"] = algorithm
+
+    # Resolve passphrase
+    passphrase = enc.get("passphrase", "")
+    key_name = enc.get("key_name", "")
+
+    if key_name and not passphrase:
+        # Look up in global encryption_keys
+        found = False
+        for ek in config.get("encryption_keys", []):
+            if ek.get("name") == key_name:
+                passphrase = ek.get("passphrase", "")
+                found = True
+                break
+        if not found:
+            print(
+                f"[ERROR] Job '{job_label}': encryption.key_name '{key_name}' "
+                f"not found in 'encryption_keys' section."
+            )
+            sys.exit(1)
+
+    if not passphrase:
+        print(
+            f"[ERROR] Job '{job_label}': encryption is enabled but no passphrase "
+            f"is provided. Set 'passphrase' directly or reference a 'key_name'."
+        )
+        sys.exit(1)
+
+    enc["passphrase"] = passphrase
+    enc["enabled"] = True
 
 
 def get_endpoint_config(config, endpoint_name):

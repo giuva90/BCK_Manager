@@ -1,6 +1,12 @@
 """
 BCK Manager - Backup Module
-Handles backup operations: compress and upload to S3.
+Handles backup operations: compress, optionally encrypt, and upload to S3.
+
+When encryption is enabled, the backup follows a 2-step approach:
+  Step 1: pre_command → create local archive → post_command
+          (services can restart immediately after the local copy is made)
+  Step 2: encrypt archive → upload to S3 → cleanup
+          (time-consuming operations happen while services are already running)
 """
 
 import os
@@ -11,6 +17,7 @@ from s3_client import S3Client
 from config_loader import get_endpoint_config
 from retention import apply_retention
 from docker_utils import backup_volume, docker_available, volume_exists
+from encryption import encrypt_file, get_encryption_config
 from utils import (
     compress_folder,
     compress_single_file,
@@ -23,6 +30,14 @@ from utils import (
 def run_backup_job(job, config, logger):
     """
     Execute a single backup job.
+
+    When encryption is enabled, the flow is restructured into two steps
+    so that the post_command (e.g. restarting a service) runs as soon as
+    the local archive is created — before the potentially time-consuming
+    encryption and upload phases:
+
+      Step 1:  pre_command → compress data → post_command
+      Step 2:  encrypt (if enabled) → upload → cleanup
 
     Args:
         job: Backup job configuration dict.
@@ -44,6 +59,10 @@ def run_backup_job(job, config, logger):
     pre_command = job.get("pre_command", "")
     post_command = job.get("post_command", "")
 
+    # Resolve encryption configuration
+    enc_config = get_encryption_config(job, config)
+    encryption_enabled = enc_config.get("enabled", False)
+
     logger.info("=" * 50)
     logger.info(f"BACKUP JOB: {job_name}")
     if mode == "volume":
@@ -52,6 +71,10 @@ def run_backup_job(job, config, logger):
         logger.info(f"  Source : {source_path}")
     logger.info(f"  Bucket : {bucket}/{prefix}")
     logger.info(f"  Mode   : {mode}")
+    if encryption_enabled:
+        logger.info(f"  Encrypt: YES ({enc_config['algorithm']})")
+    else:
+        logger.info(f"  Encrypt: no")
     if pre_command:
         logger.info(f"  Pre-cmd: {pre_command}")
     if post_command:
@@ -89,9 +112,18 @@ def run_backup_job(job, config, logger):
         logger.error(f"Unable to connect to S3 endpoint: {e}")
         return False
 
-    # --- Execute pre-command hook ---
+    # --- STEP 1: pre_command → local backup ---
+    # When encryption is enabled the flow is split in two steps so that
+    # post_command (e.g. restarting services) can run right after the
+    # local archive is created, before the time-consuming encryption
+    # and upload phases.
+
+    # Execute pre-command hook
     if pre_command:
         if not _run_hook("pre_command", pre_command, job_name, logger):
+            # post_command must still run (always, even on failure)
+            if post_command:
+                _run_hook("post_command", post_command, job_name, logger)
             return False
 
     # Create temp directory for this job
@@ -101,12 +133,21 @@ def run_backup_job(job, config, logger):
     success = True
     uploaded_count = 0
     failed_count = 0
+    post_command_done = False
 
     try:
         if mode == "volume":
-            # Backup Docker volume
-            success = _backup_docker_volume(
-                s3, volume_name, bucket, prefix, compression, job_temp_dir, logger
+            archive_path = _compress_docker_volume(
+                volume_name, compression, job_temp_dir, logger
+            )
+
+            # 2-step: run post_command right after local archive is ready
+            if post_command and encryption_enabled and archive_path:
+                _run_hook("post_command", post_command, job_name, logger)
+                post_command_done = True
+
+            success = _encrypt_and_upload(
+                s3, archive_path, bucket, prefix, logger, enc_config
             )
             if success:
                 uploaded_count = 1
@@ -114,9 +155,17 @@ def run_backup_job(job, config, logger):
                 failed_count = 1
 
         elif mode == "folder":
-            # Compress entire folder as one archive
-            success = _backup_folder(
-                s3, source_path, bucket, prefix, compression, job_temp_dir, logger
+            archive_path = compress_folder(
+                source_path, job_temp_dir, compression, logger
+            )
+
+            # 2-step: run post_command right after local archive is ready
+            if post_command and encryption_enabled and archive_path:
+                _run_hook("post_command", post_command, job_name, logger)
+                post_command_done = True
+
+            success = _encrypt_and_upload(
+                s3, archive_path, bucket, prefix, logger, enc_config
             )
             if success:
                 uploaded_count = 1
@@ -145,11 +194,10 @@ def run_backup_job(job, config, logger):
             logger.info(f"Found {len(files)} file(s) to back up individually.")
 
             # Build the set of base filenames already present on S3.
-            # An archive key like "prefix/dump_2026-01-15.sql_20260115_030000.tar.gz"
-            # covers the local file "dump_2026-01-15.sql" because the archive name
-            # starts with the original filename followed by "_".
             already_backed_up = _get_already_backed_up(s3, bucket, prefix, logger)
 
+            # Compress all files first (for 2-step flow)
+            archives_to_upload = []
             skipped_count = 0
             for filename in sorted(files):
                 if _is_already_backed_up(filename, already_backed_up):
@@ -158,8 +206,25 @@ def run_backup_job(job, config, logger):
                     continue
 
                 file_path = os.path.join(source_path, filename)
-                result = _backup_single_file(
-                    s3, file_path, bucket, prefix, compression, job_temp_dir, logger
+                try:
+                    archive_path = compress_single_file(
+                        file_path, job_temp_dir, compression, logger
+                    )
+                    archives_to_upload.append(archive_path)
+                except Exception as e:
+                    logger.error(f"Error compressing {file_path}: {e}")
+                    failed_count += 1
+                    success = False
+
+            # 2-step: run post_command after all files are compressed
+            if post_command and encryption_enabled and archives_to_upload:
+                _run_hook("post_command", post_command, job_name, logger)
+                post_command_done = True
+
+            # Encrypt and upload each archive
+            for archive_path in archives_to_upload:
+                result = _encrypt_and_upload(
+                    s3, archive_path, bucket, prefix, logger, enc_config
                 )
                 if result:
                     uploaded_count += 1
@@ -170,6 +235,11 @@ def run_backup_job(job, config, logger):
             if skipped_count:
                 logger.info(f"{skipped_count} file(s) skipped (already on S3).")
 
+    except Exception as e:
+        logger.error(f"Error in backup job '{job_name}': {e}")
+        success = False
+        failed_count += 1
+
     finally:
         # Cleanup temp directory for this job
         cleanup_temp(job_temp_dir, logger)
@@ -177,7 +247,8 @@ def run_backup_job(job, config, logger):
     logger.info(f"Job '{job_name}' done: {uploaded_count} uploaded, {failed_count} failed.")
 
     # --- Execute post-command hook (always, even on failure) ---
-    if post_command:
+    # Skip if already executed in the 2-step flow above.
+    if post_command and not post_command_done:
         _run_hook("post_command", post_command, job_name, logger)
 
     # --- Apply retention policy after a successful backup ---
@@ -272,67 +343,70 @@ def _is_already_backed_up(filename, backed_up_basenames):
     return any(b.startswith(prefix_to_match) for b in backed_up_basenames)
 
 
-def _backup_docker_volume(s3, volume_name, bucket, prefix, compression, temp_dir, logger):
-    """Backup a Docker volume: compress via container, upload, clean up."""
-    archive_path = None
+def _compress_docker_volume(volume_name, compression, temp_dir, logger):
+    """
+    Create a compressed archive of a Docker volume.
+
+    Returns:
+        Path to the archive, or None on failure.
+    """
     try:
-        archive_path = backup_volume(volume_name, temp_dir, compression, logger)
-        archive_name = os.path.basename(archive_path)
+        return backup_volume(volume_name, temp_dir, compression, logger)
+    except Exception as e:
+        logger.error(f"Error compressing volume {volume_name}: {e}")
+        return None
+
+
+def _encrypt_and_upload(s3, archive_path, bucket, prefix, logger,
+                        enc_config=None):
+    """
+    Optionally encrypt an archive and upload it to S3.
+
+    If encryption is enabled, the archive is encrypted in-place (the
+    original file is replaced with the encrypted version).
+
+    Args:
+        s3: S3Client instance.
+        archive_path: Path to the local archive file.
+        bucket: S3 bucket name.
+        prefix: S3 key prefix.
+        logger: Logger instance.
+        enc_config: Encryption configuration dict (or None).
+
+    Returns:
+        True if successful, False otherwise.
+    """
+    if archive_path is None:
+        return False
+
+    current_path = archive_path
+    try:
+        # --- Encrypt if enabled ---
+        if enc_config and enc_config.get("enabled"):
+            logger.info("[encryption] Encrypting archive before upload...")
+            current_path = encrypt_file(
+                current_path,
+                enc_config["passphrase"],
+                logger,
+                algorithm=enc_config.get("algorithm", "AES-256-GCM"),
+            )
+
+        archive_name = os.path.basename(current_path)
 
         # Build S3 key
         s3_key = f"{prefix}/{archive_name}" if prefix else archive_name
 
-        s3.upload_file(archive_path, bucket, s3_key)
+        s3.upload_file(current_path, bucket, s3_key)
         return True
 
     except Exception as e:
-        logger.error(f"Error backing up volume {volume_name}: {e}")
+        logger.error(f"Error during encrypt/upload of {archive_path}: {e}")
         return False
     finally:
-        # Always remove local archive – nothing should remain on disk
-        if archive_path and os.path.exists(archive_path):
-            cleanup_temp(archive_path, logger)
-
-
-def _backup_folder(s3, source_path, bucket, prefix, compression, temp_dir, logger):
-    """Compress and upload an entire folder."""
-    archive_path = None
-    try:
-        archive_path = compress_folder(source_path, temp_dir, compression, logger)
-        archive_name = os.path.basename(archive_path)
-
-        # Build S3 key
-        s3_key = f"{prefix}/{archive_name}" if prefix else archive_name
-
-        s3.upload_file(archive_path, bucket, s3_key)
-        return True
-
-    except Exception as e:
-        logger.error(f"Error backing up folder {source_path}: {e}")
-        return False
-    finally:
-        if archive_path and os.path.exists(archive_path):
-            cleanup_temp(archive_path, logger)
-
-
-def _backup_single_file(s3, file_path, bucket, prefix, compression, temp_dir, logger):
-    """Compress and upload a single file."""
-    archive_path = None
-    try:
-        archive_path = compress_single_file(file_path, temp_dir, compression, logger)
-        archive_name = os.path.basename(archive_path)
-
-        # Build S3 key
-        s3_key = f"{prefix}/{archive_name}" if prefix else archive_name
-
-        s3.upload_file(archive_path, bucket, s3_key)
-        return True
-
-    except Exception as e:
-        logger.error(f"Error backing up file {file_path}: {e}")
-        return False
-    finally:
-        if archive_path and os.path.exists(archive_path):
+        if current_path and os.path.exists(current_path):
+            cleanup_temp(current_path, logger)
+        # Also clean up original if it still exists (encryption failed mid-way)
+        if archive_path != current_path and os.path.exists(archive_path):
             cleanup_temp(archive_path, logger)
 
 
