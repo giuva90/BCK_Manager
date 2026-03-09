@@ -119,7 +119,8 @@ def get_containers_using_volume(volume_name, logger):
             continue
 
         for m in mounts:
-            if m.get("Name") == volume_name or m.get("Source", "").endswith(f"/{volume_name}"):
+            source = m.get("Source", "")
+            if m.get("Name") == volume_name or source.endswith(f"/{volume_name}") or source.endswith(f"\\{volume_name}"):
                 containers.append({
                     "id": cid,
                     "name": info.get("Names", cid),

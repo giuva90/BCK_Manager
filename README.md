@@ -1,7 +1,8 @@
 # BCK Manager
 
-A lightweight, reliable console-based backup manager for Docker infrastructure on Debian/Ubuntu servers.  
-Manages compressed backups to any S3-compatible object storage (OVH, AWS S3, MinIO, Backblaze B2, etc.).
+A lightweight, reliable console-based backup manager for server and Docker infrastructure.  
+Manages compressed backups to any S3-compatible object storage (OVH, AWS S3, MinIO, Backblaze B2, etc.).  
+Works on both **Linux** (Debian/Ubuntu) and **Windows** systems.
 
 ## Features
 
@@ -17,18 +18,29 @@ Manages compressed backups to any S3-compatible object storage (OVH, AWS S3, Min
 - **Volume restore** – restore a Docker volume to a new name or replace the original (with container safety checks)
 - **Bucket explorer** – list buckets and browse their contents directly from the terminal
 - **Interactive & CLI modes** – number-based menu or command-line flags for cron/automation
-- **Full logging** – every operation is recorded in `/var/log/bck_manager.log`
-- **Cron-ready** – example crontab included
+- **Cross-platform** – runs on Linux and Windows with the same interface and functionality
+- **Full logging** – every operation is recorded to a log file
+- **Cron / Task Scheduler ready** – example configurations included for both platforms
 
 ## Requirements
 
-- Debian / Ubuntu Server
+### Linux
+- Debian / Ubuntu Server (or any Linux distribution with Python 3)
 - Python 3.8+
-- Root access
+- Root access (for default paths under `/opt`, `/var/log`)
 - Docker (for volume backup/restore jobs)
 - An S3-compatible endpoint (OVH Object Storage, AWS S3, MinIO, etc.)
 
+### Windows
+- Windows 10/11 or Windows Server 2016+
+- Python 3.8+ ([download](https://www.python.org/downloads/) – check **Add Python to PATH** during installation)
+- Administrator access (for installation to `%ProgramData%`)
+- Docker Desktop (for volume backup/restore jobs)
+- An S3-compatible endpoint (OVH Object Storage, AWS S3, MinIO, etc.)
+
 ## Installation
+
+### Linux
 
 ```bash
 # Copy the project files to your server, then:
@@ -44,6 +56,22 @@ The installer will:
 3. Create (or update) the Python virtual environment with all dependencies
 4. Create (or update) the `bck-manager` command in `/usr/local/bin`
 
+### Windows
+
+Open an **elevated (Administrator) PowerShell** prompt and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+The installer will:
+1. Check that Python 3 is installed and in PATH
+2. Copy all application files to `%ProgramData%\bck_manager`
+3. Create (or update) the Python virtual environment with all dependencies
+4. Create a `bck-manager.bat` launcher and add it to the system PATH
+
+> **Note**: Open a **new** terminal after installation for PATH changes to take effect.
+
 #### Config file handling during updates
 
 When an existing `config.yaml` is found, the script asks whether to overwrite it (default **N**).
@@ -52,7 +80,9 @@ before being replaced by the example template.
 
 ## Configuration
 
-Edit `/opt/bck_manager/config.yaml`:
+Edit the configuration file:
+- **Linux**: `/opt/bck_manager/config.yaml`
+- **Windows**: `%ProgramData%\bck_manager\config.yaml`
 
 ```yaml
 s3_endpoints:
@@ -81,7 +111,8 @@ notifications:
 
 backup_jobs:
   - name: "app-data"
-    source_path: "/opt/myapp/data"
+    source_path: "/opt/myapp/data"           # Linux
+    # source_path: "C:\\MyApp\\data"          # Windows
     bucket: "my-backups"
     s3_endpoint: "ovh-gra"
     prefix: "app-data"
@@ -95,7 +126,17 @@ backup_jobs:
       enabled: true
       key_name: "production-key"
     enabled: true
+
+settings:
+  temp_dir: "/tmp/bck_manager"               # Linux
+  # temp_dir: "C:\\Temp\\bck_manager"         # Windows
+  log_file: "/var/log/bck_manager.log"       # Linux
+  # log_file: "C:\\ProgramData\\bck_manager\\bck_manager.log"  # Windows
+  compression: "tar.gz"
 ```
+
+> **Note**: On Windows, if you omit `temp_dir` and `log_file`, platform-appropriate defaults are
+> used automatically (system temp folder and application directory respectively).
 
 ### Encryption
 
@@ -422,12 +463,19 @@ The backup process:
 4. Uploads the archive to S3.
 5. Removes the temporary container and local archive — **nothing is left on disk**.
 
+> **Note**: Docker volume mode requires Docker to be installed and running.
+> On Windows, Docker Desktop with WSL2 backend is recommended.
+
 #### Volume restore
 
 Volume restore is available via the interactive menu (option 7) or CLI:
 
 ```bash
+# Linux
 sudo bck-manager --restore-volume postgres-volume
+
+# Windows (elevated prompt)
+bck-manager --restore-volume postgres-volume
 ```
 
 The restore flow asks you to choose between two modes:
@@ -445,6 +493,11 @@ configured for the job before extraction.
 Each job can optionally define `pre_command` and `post_command`:
 
 ```yaml
+# Linux
+pre_command: "docker stop myapp_db"
+post_command: "docker start myapp_db"
+
+# Windows
 pre_command: "docker stop myapp_db"
 post_command: "docker start myapp_db"
 ```
@@ -455,7 +508,7 @@ post_command: "docker start myapp_db"
 | `post_command` | Runs **after** the backup finishes. It executes **regardless** of whether the backup succeeded or failed, so it is safe to use for cleanup (e.g. restarting a stopped container). |
 
 Both fields are optional and default to an empty string (no command).
-Commands are executed via the system shell with a **10-minute timeout**.
+Commands are executed via the system shell (`/bin/sh` on Linux, `cmd.exe` on Windows) with a **10-minute timeout**.
 
 > **Note**: When encryption is enabled, `post_command` runs right after the local
 > archive is created (before encryption and upload). See [2-step backup flow](#2-step-backup-flow-with-encryption).
@@ -464,42 +517,48 @@ Commands are executed via the system shell with a **10-minute timeout**.
 
 ### Interactive mode
 ```bash
+# Linux
 sudo bck-manager
+
+# Windows (elevated prompt)
+bck-manager
 ```
 
 ### Command-line (non-interactive)
 ```bash
 # Run all enabled jobs
-sudo bck-manager --run-all
+bck-manager --run-all
 
 # Run a single job
-sudo bck-manager --run-job app-data
+bck-manager --run-job app-data
 
 # Apply retention policies (preview mode)
-sudo bck-manager --apply-retention --dry
+bck-manager --apply-retention --dry
 
 # Apply retention policies (actually delete)
-sudo bck-manager --apply-retention
+bck-manager --apply-retention
 
 # Restore a Docker volume (interactive)
-sudo bck-manager --restore-volume postgres-volume
+bck-manager --restore-volume postgres-volume
 
 # List configured jobs (🔒 = encrypted)
-sudo bck-manager --list-jobs
+bck-manager --list-jobs
 
 # Use a different config file
-sudo bck-manager --config /path/to/config.yaml
+bck-manager --config /path/to/config.yaml
 
 # Verbose debug output (shows full SMTP session, raw email, etc.)
 # --debug can be combined with ANY command:
-sudo bck-manager --run-all --debug
-sudo bck-manager --run-job app-data --debug
-sudo bck-manager --apply-retention --debug
-sudo bck-manager --restore-volume postgres-volume --debug
-sudo bck-manager --list-jobs --debug
+bck-manager --run-all --debug
+bck-manager --run-job app-data --debug
+bck-manager --apply-retention --debug
 ```
 
-### Schedule with cron
+> **Linux note**: Commands that access system paths (e.g. `/opt`, `/var/log`) typically require `sudo`.
+
+### Schedule backups automatically
+
+#### Linux (cron)
 ```bash
 sudo crontab -e
 # Add:
@@ -508,37 +567,66 @@ sudo crontab -e
 
 See `crontab.example` for more scheduling examples.
 
+#### Windows (Task Scheduler)
+
+Use the Windows Task Scheduler to run backups automatically:
+
+```powershell
+# Create a daily task that runs at 02:00 AM
+schtasks /create /tn "BCK Manager - Daily Backup" /tr "bck-manager --run-all" /sc daily /st 02:00 /ru SYSTEM /rl HIGHEST
+```
+
+Or use the Task Scheduler GUI:
+1. Open **Task Scheduler** (`taskschd.msc`)
+2. Click **Create Task**
+3. Set the trigger (e.g. daily at 02:00)
+4. Set the action: run `bck-manager` with argument `--run-all`
+5. Run with highest privileges
+
+See `scheduled_task.example.md` for more examples.
+
 ## Project structure
 
 ```
 BCK_Manager/
-├── bck_manager.py      # Main entry point and interactive menu
-├── config_loader.py    # Configuration loading and validation
-├── s3_client.py        # S3 client (boto3 wrapper)
-├── backup.py           # Backup logic (compression + encryption + upload)
-├── encryption.py       # Client-side encryption (AES-256-GCM)
-├── notifier.py         # Email notifications (SMTP + HTML template)
-├── retention.py        # Retention policy engine (simple & smart)
-├── restore.py          # Restore logic (download + decryption + extraction)
-├── docker_utils.py     # Docker volume backup & restore helpers
-├── utils.py            # Compression helpers and utilities
-├── app_logger.py       # Logging setup
-├── config.yaml         # Configuration file (not committed – see .gitignore)
-├── config.yaml.example # Safe example config to include in the repo
-├── requirements.txt    # Python dependencies
-├── install.sh          # Installer script
-├── crontab.example     # Example crontab entries
-└── README.md           # This file
+├── bck_manager.py          # Main entry point and interactive menu
+├── config_loader.py        # Configuration loading and validation
+├── s3_client.py            # S3 client (boto3 wrapper)
+├── backup.py               # Backup logic (compression + encryption + upload)
+├── encryption.py           # Client-side encryption (AES-256-GCM)
+├── notifier.py             # Email notifications (SMTP + HTML template)
+├── retention.py            # Retention policy engine (simple & smart)
+├── restore.py              # Restore logic (download + decryption + extraction)
+├── docker_utils.py         # Docker volume backup & restore helpers
+├── utils.py                # Compression helpers and utilities
+├── app_logger.py           # Logging setup
+├── config.yaml             # Configuration file (not committed – see .gitignore)
+├── config.yaml.example     # Safe example config to include in the repo
+├── requirements.txt        # Python dependencies
+├── install.sh              # Linux installer script (Bash)
+├── install.ps1             # Windows installer script (PowerShell)
+├── crontab.example         # Example crontab entries (Linux)
+├── scheduled_task.example.md # Example Task Scheduler setup (Windows)
+└── README.md               # This file
 ```
 
 ## Logging
 
-All operations are logged to `/var/log/bck_manager.log`.  
+All operations are logged to a file:
+- **Linux**: `/var/log/bck_manager.log` (default)
+- **Windows**: `bck_manager.log` in the application directory (default)
+
+The log path can be customised in `config.yaml` via the `settings.log_file` field.
+
 Format: `YYYY-MM-DD HH:MM:SS | LEVEL    | message`
 
 To follow the log in real time:
 ```bash
+# Linux
 tail -f /var/log/bck_manager.log
+
+# Windows (PowerShell)
+Get-Content -Path "C:\ProgramData\bck_manager\bck_manager.log" -Wait
 ```
 
 ## Security notes
@@ -552,7 +640,8 @@ tail -f /var/log/bck_manager.log
   any tampering with the ciphertext is detected during decryption.
 - `config.yaml` is listed in `.gitignore` to prevent accidentally committing credentials
   and encryption passphrases. Use `config.yaml.example` as the committed reference template.
-- The tool requires root to access all server paths. Run it only on trusted machines.
+- On Linux, the tool may require root to access all server paths. Run it only on trusted machines.
+- On Windows, run with Administrator privileges when accessing protected directories.
 - Archive extraction includes a path traversal check to prevent malicious archives.
 
 ## License

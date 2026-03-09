@@ -44,6 +44,8 @@ encryption_keys:
 # Fields:
 #   name           : Unique descriptive name for this job
 #   source_path    : Absolute path on the server to back up (for folder/files modes)
+#                    Linux:   "/opt/myapp/data"
+#                    Windows: "C:\\MyApp\\data"
 #   volume_name    : Docker volume name to back up (for volume mode)
 #   bucket         : Target S3 bucket name
 #   s3_endpoint    : Name of the S3 endpoint (must match one above)
@@ -152,10 +154,16 @@ backup_jobs:
 # --- General Settings ---
 settings:
   # Temporary directory for creating archives before upload
+  # Linux:
   temp_dir: "/tmp/bck_manager"
+  # Windows (uncomment and adjust):
+  # temp_dir: "C:\\Temp\\bck_manager"
 
   # Log file path
+  # Linux:
   log_file: "/var/log/bck_manager.log"
+  # Windows (uncomment and adjust):
+  # log_file: "C:\\ProgramData\\bck_manager\\bck_manager.log"
 
   # Compression format: "tar.gz" | "tar.bz2" | "tar.xz"
   compression: "tar.gz"

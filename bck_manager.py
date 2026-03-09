@@ -4,15 +4,15 @@ BCK Manager - Backup Manager for Docker Infrastructure
 =======================================================
 
 Console application for managing backups to S3-compatible object storage.
-Designed to run on Debian/Ubuntu servers as root.
+Supports both Linux and Windows systems.
 
 Usage:
-    sudo python3 bck_manager.py                        # Interactive mode
-    sudo python3 bck_manager.py --run-all               # Run all enabled backup jobs
-    sudo python3 bck_manager.py --run-job <name>        # Run a specific backup job
-    sudo python3 bck_manager.py --apply-retention       # Apply retention on all jobs
-    sudo python3 bck_manager.py --restore-volume <job>  # Restore a Docker volume
-    sudo python3 bck_manager.py --config <path>         # Use a specific config file
+    python3 bck_manager.py                        # Interactive mode
+    python3 bck_manager.py --run-all               # Run all enabled backup jobs
+    python3 bck_manager.py --run-job <name>        # Run a specific backup job
+    python3 bck_manager.py --apply-retention       # Apply retention on all jobs
+    python3 bck_manager.py --restore-volume <job>  # Restore a Docker volume
+    python3 bck_manager.py --config <path>         # Use a specific config file
 """
 
 import os
@@ -766,20 +766,20 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sudo python3 bck_manager.py                               # Interactive mode
-  sudo python3 bck_manager.py --run-all                     # Run all backup jobs
-  sudo python3 bck_manager.py --run-job app-data            # Run a specific job
-  sudo python3 bck_manager.py --apply-retention             # Apply retention policies
-  sudo python3 bck_manager.py --apply-retention --dry       # Preview retention (no delete)
-  sudo python3 bck_manager.py --restore-volume <job>        # Restore a Docker volume (interactive)
-  sudo python3 bck_manager.py --list-jobs                   # List configured jobs
+  python3 bck_manager.py                               # Interactive mode
+  python3 bck_manager.py --run-all                     # Run all backup jobs
+  python3 bck_manager.py --run-job app-data            # Run a specific job
+  python3 bck_manager.py --apply-retention             # Apply retention policies
+  python3 bck_manager.py --apply-retention --dry       # Preview retention (no delete)
+  python3 bck_manager.py --restore-volume <job>        # Restore a Docker volume (interactive)
+  python3 bck_manager.py --list-jobs                   # List configured jobs
 
   # --debug can be combined with ANY command above for verbose output:
-  sudo python3 bck_manager.py --run-all --debug
-  sudo python3 bck_manager.py --run-job app-data --debug
-  sudo python3 bck_manager.py --apply-retention --debug
-  sudo python3 bck_manager.py --restore-volume <job> --debug
-  sudo python3 bck_manager.py --list-jobs --debug
+  python3 bck_manager.py --run-all --debug
+  python3 bck_manager.py --run-job app-data --debug
+  python3 bck_manager.py --apply-retention --debug
+  python3 bck_manager.py --restore-volume <job> --debug
+  python3 bck_manager.py --list-jobs --debug
         """,
     )
     parser.add_argument(
@@ -847,7 +847,7 @@ def main():
     config = load_config(args.config)
 
     # Setup logging
-    log_file = config.get("settings", {}).get("log_file", "/var/log/bck_manager.log")
+    log_file = config.get("settings", {}).get("log_file")
     logger = setup_logger(log_file, debug=args.debug)
 
     # ── Non-interactive: --list-jobs ──
