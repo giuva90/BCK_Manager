@@ -6,6 +6,9 @@
 # Never commit the actual config with real credentials
 config.yaml
 
+# --- Local documentation (not for git) ---
+tool_backup.md
+
 # --- Python ---
 __pycache__/
 *.py[cod]
