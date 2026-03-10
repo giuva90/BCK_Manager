@@ -47,7 +47,7 @@ def compress_folder(source_path, dest_dir, compression, logger):
     Returns:
         Path to the created archive file.
     """
-    folder_name = os.path.basename(source_path.rstrip("/"))
+    folder_name = os.path.basename(os.path.normpath(source_path))
     timestamp = get_timestamp()
     ext = get_archive_extension(compression)
     archive_name = f"{folder_name}_{timestamp}{ext}"

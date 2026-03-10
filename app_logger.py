@@ -5,17 +5,34 @@ Centralized logging for all operations.
 
 import logging
 import os
+import platform
 import sys
 from datetime import datetime
 
 
-def setup_logger(log_file="/var/log/bck_manager.log", debug=False):
+def _default_log_path():
+    """Return a sensible default log file path for the current platform."""
+    if platform.system() == "Windows":
+        return os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "bck_manager.log"
+        )
+    return "/var/log/bck_manager.log"
+
+
+def setup_logger(log_file=None, debug=False):
     """
     Configure and return the application logger.
     Logs to both file and stdout.
     When *debug* is True the console handler is lowered to DEBUG level,
     showing verbose output including full SMTP session details.
+
+    If *log_file* is ``None``, a platform-appropriate default is used:
+      - Linux: ``/var/log/bck_manager.log``
+      - Windows: ``bck_manager.log`` in the application directory
     """
+    if log_file is None:
+        log_file = _default_log_path()
+
     logger = logging.getLogger("bck_manager")
     logger.setLevel(logging.DEBUG)
 
@@ -40,7 +57,7 @@ def setup_logger(log_file="/var/log/bck_manager.log", debug=False):
         fh.setFormatter(fmt)
         logger.addHandler(fh)
     except PermissionError:
-        # Fallback to local log if we can't write to /var/log
+        # Fallback to local log if we can't write to the configured path
         fallback_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "bck_manager.log"
         )

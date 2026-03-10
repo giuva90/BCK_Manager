@@ -4,7 +4,10 @@ Loads and validates the YAML configuration file.
 """
 
 import os
+import platform
 import sys
+import tempfile
+
 import yaml
 
 
@@ -133,8 +136,17 @@ def _validate_config(config):
 
     # Settings defaults
     config.setdefault("settings", {})
-    config["settings"].setdefault("temp_dir", "/tmp/bck_manager")
-    config["settings"].setdefault("log_file", "/var/log/bck_manager.log")
+    if platform.system() == "Windows":
+        _app_dir = os.path.dirname(os.path.abspath(__file__))
+        config["settings"].setdefault(
+            "temp_dir", os.path.join(tempfile.gettempdir(), "bck_manager")
+        )
+        config["settings"].setdefault(
+            "log_file", os.path.join(_app_dir, "bck_manager.log")
+        )
+    else:
+        config["settings"].setdefault("temp_dir", "/tmp/bck_manager")
+        config["settings"].setdefault("log_file", "/var/log/bck_manager.log")
     config["settings"].setdefault("compression", "tar.gz")
     config["settings"].setdefault("max_concurrent_uploads", 1)
 
